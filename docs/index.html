@@ -1,34 +1,75 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Adaptive Regression Discontinuity Demonstration</title>
+  <title>Designing a Quasi-Experiment for Adaptive Risk Prediction Models</title>
   <style>
     body {
-      font-family: Arial, sans-serif;
-      max-width: 700px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 800px;
       margin: 40px auto;
+      padding: 0 20px;
       line-height: 1.6;
-      text-align: center;
+      color: #333;
     }
-    a.button {
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      text-align: center;
+      font-size: 1.8em;
+      margin-bottom: 0.5em;
+    }
+    .authors {
+      text-align: center;
+      font-size: 0.95em;
+      margin-bottom: 2em;
+      color: #555;
+    }
+    .button {
       display: inline-block;
       padding: 10px 20px;
       margin-top: 20px;
       text-decoration: none;
+      color: #333;
       border: 1px solid #333;
       border-radius: 4px;
+    }
+    .button:hover {
+      background-color: #f0f0f0;
+    }
+    .center {
+      text-align: center;
+    }
+    footer {
+      margin-top: 3em;
+      font-size: 0.85em;
+      text-align: center;
+      color: #777;
     }
   </style>
 </head>
 <body>
-  <h1>Adaptive Regression Discontinuity Simulation</h1>
+
+  <h1>Designing a Quasi-Experiment to Study the Clinical Impact of Adaptive Risk Prediction Models</h1>
+
+  <div class="authors">
+    Valerie Odeh-Couvertier · Gabriel Zayas-Cabán · Brian Patterson · Amy Cochran
+  </div>
+
   <p>
-    This project demonstrates how adaptive risk thresholds can be evaluated using 
-    simulation-based regression discontinuity designs in clinical decision settings.
+    This project accompanies the manuscript <em>Designing a quasi-experiment to study the clinical impact of adaptive risk prediction models</em>. Advances in clinical risk prediction have made it possible to target interventions based on patient-level risk, but evaluating these systems using randomized trials is often impractical. Existing quasi-experimental designs rarely allow decision rules—such as risk thresholds or prediction models—to adapt over time, even though such adaptation is common in practice.
   </p>
+
   <p>
-    <a class="button" href="adaptive_rd_demo.html">View the Full Demo</a>
+    To address this gap, we introduce an adaptive regression discontinuity (RD) framework and demonstrate its properties using simulation. In the clinical context of cardiovascular risk and lipid-lowering therapy, this demo illustrates how evolving treatment rules can be evaluated using quasi-experimental principles.
   </p>
+
+  <div class="center">
+    <a class="button" href="adaptive_rd_demo.html">Launch Simulation Demo</a>
+  </div>
+
+  <footer>
+    Preprint coming soon · Project under development
+  </footer>
+
 </body>
 </html>
