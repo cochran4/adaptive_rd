@@ -1,0 +1,22 @@
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Raw data folders
+data_raw/
+
+# Old folder
+QEDLrnSys-main
+
+# Output & cache
+.DS_Store
+*.rds
+*.csv
+*.pdf
+*.png
+
+# R Markdown / Quarto cache
+*_cache/
+cache/
