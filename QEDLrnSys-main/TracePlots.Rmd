@@ -1,0 +1,502 @@
+---
+title: "Trace Plots"
+author: "Valerie Odeh"
+date: "2023-10-30"
+output: html_document
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+library(foreign)
+library(tidyverse)
+library(mice)
+library(dplyr)
+library(gee)
+library(optimx)
+library(future.apply)
+
+
+# NHANES DATA 2017-2018
+#set working directory
+file=setwd("/Users/valerieodeh/Library/CloudStorage/OneDrive-UW-Madison/R codes")
+
+
+getwd()
+
+demo <- read.xport(file="DEMO_J.XPT")
+bpx <- read.xport(file="BPX_J.XPT")
+diq <- read.xport(file="DIQ_J.XPT")
+bpq <- read.xport(file="BPQ_J.XPT")
+hdl <- read.xport(file="HDL_J.XPT")
+trigly <- read.xport(file="TRIGLY_J.XPT")
+bmx <- read.xport(file="BMX_J.XPT")
+glu <- read.xport(file="GLU_J.XPT")
+```
+
+
+```{r, include=FALSE}
+
+#put all data frames into list
+df_list <- list(demo, bpx, diq, bpq, hdl, trigly, bmx, glu)     
+
+#merge all data frames together
+NHANES <- df_list %>% reduce(full_join, by='SEQN')
+#NHANES <- df_list %>% reduce(merge, by='SEQN', all=FALSE)
+
+data <- NHANES[,c("RIDAGEYR", "RIAGENDR", "BPXSY1", "BPXDI1","BPQ050A", "LBXGLU", "LBDHDD", "LBXTR", "BMXBMI", "DIQ010", "DIQ175A")]
+
+data <- subset(data, RIDAGEYR>=45 & RIDAGEYR<=65) #between 45 and 65 years old (middle aged)
+data <- subset(data, DIQ010=="2") #no diab initially
+
+#data cleaning
+
+#gender #1=male(ref), 2=female ---> change to 1=male(ref), 0=female
+data$RIAGENDR <- ifelse(data$RIAGENDR=="1",1,0)
+
+#BP meds #1=yes(ref), 2=no ---> change to 1=yes(ref), 0=no
+data$BPQ050A <- ifelse(data$BPQ050A=="1",1,0)
+
+#diabetes family history #10=yes(ref) ---> change to 1=yes(ref), 0=no
+data$DIQ175A<- ifelse(data$DIQ175A=="10",1,0)
+data$DIQ175A[is.na(data$DIQ175A)] <- 0
+#str(data)
+
+#data imputation
+set.seed(1)
+imputed <- mice(data)
+data <- complete(imputed)
+
+# Standardized variables
+data$sex.s <- as.numeric(scale(data$RIAGENDR))
+data$hdiab.s <- as.numeric(scale(data$DIQ175A))
+data$age.s <- as.numeric(scale(data$RIDAGEYR))
+data$BMI.s <- as.numeric(scale(data$BMXBMI))
+data$HDL.s <- as.numeric(scale(data$LBDHDD))
+data$trig.s <- as.numeric(scale(data$LBXTR))
+data$glu.s <- as.numeric(scale(data$LBXGLU))
+data$bp1.s <- as.numeric(scale(data$BPXSY1))
+data$bp2.s <- as.numeric(scale(data$BPXDI1))
+data$bp3.s <- as.numeric(scale(data$BPQ050A))
+
+
+# 7-year risk of diabetes type 2
+#for risk calc:
+
+#age categories
+data$age1 <- ifelse(data$RIDAGEYR < 50, 1, 0)
+data$age2 <- ifelse(data$RIDAGEYR >= 50 & data$RIDAGEYR < 65, 1, 0)
+data$age3 <- ifelse(data$RIDAGEYR >= 65, 1, 0)
+data$age <- ifelse(data$age1 == 1, 1, ifelse(data$age2 == 1, 2, 3)) #general cat for revision
+data$age <- as.factor(data$age) #make age cat
+#BMI categories
+data$BMI1 <- ifelse(data$BMXBMI < 25, 1, 0)
+data$BMI2 <- ifelse(data$BMXBMI >= 25 & data$BMXBMI < 30, 1, 0)
+data$BMI3 <- ifelse(data$BMXBMI >= 30, 1, 0)
+data$BMI <- ifelse(data$BMI1 == 1, 1, ifelse(data$BMI2 == 1, 2, 3)) #general cat for revision
+data$BMI <- as.factor(data$BMI) #make BMI cat
+#HDL categories
+data$HDL <- ifelse((data$RIAGENDR == 1 & data$LBDHDD < 40) | (data$RIAGENDR == 0 & data$LBDHDD < 50), 1, 0)
+#triglyceride
+data$trig <- ifelse(data$LBXTR >= 150, 1, 0)
+#fasting glucose
+data$glucose <- ifelse(data$LBXGLU >= 100, 1, 0)
+#blood pressure
+data$bp <- ifelse(data$BPXSY1 >= 130 | data$BPXDI1 >=85 | data$BPQ050A == 1, 1, 0)
+
+#linesearch of optimal cutoff value to reach 50% of treatment rate
+#initialize
+p <- .5
+data$c <- .05
+
+
+data$Zhat <- -5.517-0.018*data$age2-0.081*data$age3-0.010*data$RIAGENDR+0.565*data$DIQ175A+0.301*data$BMI2+0.92*data$BMI3+0.498*data$bp+0.944*data$HDL+0.575*data$trig+1.980*data$glucose
+
+data$risk <- (1/(1+exp(-data$Zhat)))-data$c
+data$A <- ifelse(data$risk>=0, 1, 0)
+
+data$Zprob <- (1/(1+exp(-(0.5*data$Zhat+0.5))))-.2*data$A
+
+set.seed(1)
+data$Zreal <- rbinom(n=nrow(data), size = 1, prob = data$Zprob)
+
+
+
+dataraw <- data
+
+rm(demo)
+rm(bpx)
+rm(diq)
+rm(bpq)
+rm(hdl)
+rm(trigly)
+rm(bmx)
+rm(glu)
+rm(NHANES)
+rm(imputed)
+rm(df_list)
+```
+
+
+#table 1
+
+```{r}
+library("gtsummary")
+library("kableExtra")
+
+data %>% 
+  select(RIDAGEYR, RIAGENDR, BPXSY1, BPXDI1, BPQ050A, LBXGLU, LBDHDD, LBXTR, BMXBMI, DIQ175A)%>%
+  tbl_summary(
+    statistic = list(all_categorical() ~ "{n} ({p}%)",
+                     RIDAGEYR     ~ "{mean} ({sd})",
+                     BPXSY1     ~ "{mean} ({sd})",
+                     BPXDI1   ~ "{mean} ({sd})",
+                     LBXGLU  ~ "{mean} ({sd})",
+                     LBDHDD     ~ "{mean} ({sd})",
+                     LBXTR   ~ "{mean} ({sd})",
+                     BMXBMI     ~ "{mean} ({sd})"),
+    digits = list(all_continuous()  ~ c(2, 2),
+                  all_categorical() ~ c(0, 1)),
+    type = list(RIAGENDR   ~ "categorical",
+                BPQ050A     ~ "categorical",
+                DIQ175A      ~ "categorical"),
+    label = list(RIAGENDR  ~ "Sex",
+                 RIDAGEYR     ~ "Age (years)",
+                 BMXBMI     ~ "Body Mass Index (kg/m2)",
+                 LBXTR  ~ "Triglyceride (mg/dL)",
+                 LBXGLU ~ "Fasting Glucose (mg/dL)",
+                 BPQ050A ~ "Taking blood pressure treatment", 
+                 DIQ175A ~ "History of diabetes", 
+                 LBDHDD ~ "HDL cholesteron Total(mg/dL)", 
+                 BPXSY1 ~ "Systolic blood pressure (mm HG)", 
+                 BPXDI1 ~ "Diastolic blood pressure (mm HG)" 
+                 ) 
+  )  %>%
+ as_gt() %>%
+gt::as_raw_html()
+
+```
+
+
+
+
+
+
+
+#Recal with cutoff p function:
+```{r}
+s=1
+p=0.5
+reps=1
+  
+datarecal <- list()
+  for(k in 1:reps) {
+    
+    data <- dataraw[sample(c(1:nrow(dataraw)), size=3500, replace=TRUE),]
+    
+    
+    data$id <- seq(1, nrow(data))
+    
+    
+    for(i in 2:200) {
+      
+      data$c[i] <- max((sum(data$A[1:i-1])/data$id[i-1])-p, 0)
+      data$risk[i] <- (1/(1+exp(-data$Zhat[i])))-data$c[i]
+      data$A[i] <- ifelse(data$risk[i]>=0, 1, 0)
+      data$Zprob[i] <- (1/(1+exp(-(0.5*data$Zhat[i]+0.5))))-.2*data$A[i]
+      
+      data$Zreal[i] <- rbinom(n=1, size = 1, prob = data$Zprob[i])
+    }
+    
+    
+    data$a <- 0
+    data$b <- 0
+    
+    
+    data$s <- s #static risk pred model
+    
+    
+    data$Zhatup <- data$Zhat
+    data$riskup <- data$risk
+    data$Aup <- data$A
+    data$Zprobup <- data$Zprob
+    data$Zrealup <- data$Zreal
+    
+    
+    #fit a log reg and update linear predictor
+    for(i in 200:(nrow(data)-1)) {
+      calibrate <- glm(Zrealup~Zhatup, family = "binomial", data = data[1:i,], subset = Aup==0)
+      data$a[i+1] <- calibrate$coefficients[[1]]
+      data$b[i+1] <- calibrate$coefficients[[2]]
+      data$Zhatup[i+1] <- data$s[i+1]*data$a[i+1]+(1+data$s[i+1]*(data$b[i+1]-1))*data$Zhat[i+1]
+      
+      data$c[i+1] <- max((sum(data$Aup[1:i])/data$id[i])-p, 0)
+      data$riskup[i+1] <- (1/(1+exp(-data$Zhatup[i+1])))-data$c[i+1]
+      data$Aup[i+1] <- ifelse(data$riskup[i+1]>=0, 1, 0)
+      data$Zprobup[i+1] <- (1/(1+exp(-(0.5*data$Zhatup[i+1]+0.5))))-.2*data$Aup[i+1]
+      data$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data$Zprobup[i+1])
+    }
+    
+    datarecal[[k]] <- data
+    
+  }
+
+datas1 <- data.frame(datarecal[[1]]$a,datarecal[[1]]$b, datarecal[[1]]$c)
+colnames(datas1) <- c('a','b','c') 
+```
+
+```{r}
+s=0
+p=0.5
+reps=1
+  
+datarecal <- list()
+  for(k in 1:reps) {
+    
+    data <- dataraw[sample(c(1:nrow(dataraw)), size=3500, replace=TRUE),]
+    
+    
+    data$id <- seq(1, nrow(data))
+    
+    
+    for(i in 2:200) {
+      
+      data$c[i] <- max((sum(data$A[1:i-1])/data$id[i-1])-p, 0)
+      data$risk[i] <- (1/(1+exp(-data$Zhat[i])))-data$c[i]
+      data$A[i] <- ifelse(data$risk[i]>=0, 1, 0)
+      data$Zprob[i] <- (1/(1+exp(-(0.5*data$Zhat[i]+0.5))))-.2*data$A[i]
+      
+      data$Zreal[i] <- rbinom(n=1, size = 1, prob = data$Zprob[i])
+    }
+    
+    
+    data$a <- 0
+    data$b <- 0
+    
+    
+    data$s <- s #static risk pred model
+    
+    
+    data$Zhatup <- data$Zhat
+    data$riskup <- data$risk
+    data$Aup <- data$A
+    data$Zprobup <- data$Zprob
+    data$Zrealup <- data$Zreal
+    
+    
+    #fit a log reg and update linear predictor
+    for(i in 200:(nrow(data)-1)) {
+      calibrate <- glm(Zrealup~Zhatup, family = "binomial", data = data[1:i,], subset = Aup==0)
+      data$a[i+1] <- calibrate$coefficients[[1]]
+      data$b[i+1] <- calibrate$coefficients[[2]]
+      data$Zhatup[i+1] <- data$s[i+1]*data$a[i+1]+(1+data$s[i+1]*(data$b[i+1]-1))*data$Zhat[i+1]
+      
+      data$c[i+1] <- max((sum(data$Aup[1:i])/data$id[i])-p, 0)
+      data$riskup[i+1] <- (1/(1+exp(-data$Zhatup[i+1])))-data$c[i+1]
+      data$Aup[i+1] <- ifelse(data$riskup[i+1]>=0, 1, 0)
+      data$Zprobup[i+1] <- (1/(1+exp(-(0.5*data$Zhatup[i+1]+0.5))))-.2*data$Aup[i+1]
+      data$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data$Zprobup[i+1])
+    }
+    
+    datarecal[[k]] <- data
+    
+  }
+
+datas0 <- data.frame(datarecal[[1]]$a,datarecal[[1]]$b, datarecal[[1]]$c)
+colnames(datas0) <- c('a','b','c') 
+```
+
+```{r}
+s=0.5
+p=0.5
+reps=1
+  
+datarecal <- list()
+  for(k in 1:reps) {
+    
+    data <- dataraw[sample(c(1:nrow(dataraw)), size=3500, replace=TRUE),]
+    
+    
+    data$id <- seq(1, nrow(data))
+    
+    
+    for(i in 2:200) {
+      
+      data$c[i] <- max((sum(data$A[1:i-1])/data$id[i-1])-p, 0)
+      data$risk[i] <- (1/(1+exp(-data$Zhat[i])))-data$c[i]
+      data$A[i] <- ifelse(data$risk[i]>=0, 1, 0)
+      data$Zprob[i] <- (1/(1+exp(-(0.5*data$Zhat[i]+0.5))))-.2*data$A[i]
+      
+      data$Zreal[i] <- rbinom(n=1, size = 1, prob = data$Zprob[i])
+    }
+    
+    
+    data$a <- 0
+    data$b <- 0
+    
+    
+    data$s <- s #static risk pred model
+    
+    
+    data$Zhatup <- data$Zhat
+    data$riskup <- data$risk
+    data$Aup <- data$A
+    data$Zprobup <- data$Zprob
+    data$Zrealup <- data$Zreal
+    
+    
+    #fit a log reg and update linear predictor
+    for(i in 200:(nrow(data)-1)) {
+      calibrate <- glm(Zrealup~Zhatup, family = "binomial", data = data[1:i,], subset = Aup==0)
+      data$a[i+1] <- calibrate$coefficients[[1]]
+      data$b[i+1] <- calibrate$coefficients[[2]]
+      data$Zhatup[i+1] <- data$s[i+1]*data$a[i+1]+(1+data$s[i+1]*(data$b[i+1]-1))*data$Zhat[i+1]
+      
+      data$c[i+1] <- max((sum(data$Aup[1:i])/data$id[i])-p, 0)
+      data$riskup[i+1] <- (1/(1+exp(-data$Zhatup[i+1])))-data$c[i+1]
+      data$Aup[i+1] <- ifelse(data$riskup[i+1]>=0, 1, 0)
+      data$Zprobup[i+1] <- (1/(1+exp(-(0.5*data$Zhatup[i+1]+0.5))))-.2*data$Aup[i+1]
+      data$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data$Zprobup[i+1])
+    }
+    
+    datarecal[[k]] <- data
+    
+  }
+
+datas0.5 <- data.frame(datarecal[[1]]$a,datarecal[[1]]$b, datarecal[[1]]$c)
+colnames(datas0.5) <- c('a','b','c') 
+```
+
+
+```{r}
+s=0.5
+reps=1
+p=0.5
+datarecal <- list()
+  for(k in 1:reps) {
+    
+    data <- dataraw[sample(c(1:nrow(dataraw)), size=3500, replace=TRUE),]
+    
+    
+    data$id <- seq(1, nrow(data))
+    
+    
+    for(i in 2:200) {
+      
+      data$c[i] <- max((sum(data$A[1:i-1])/data$id[i-1])-p, 0)
+      data$risk[i] <- (1/(1+exp(-data$Zhat[i])))-data$c[i]
+      data$A[i] <- ifelse(data$risk[i]>=0, 1, 0)
+      data$Zprob[i] <- (1/(1+exp(-(0.5*data$Zhat[i]+0.5))))-.2*data$A[i]
+        
+      data$Zreal[i] <- rbinom(n=1, size = 1, prob = data$Zprob[i])
+    }
+    
+    
+    data$s <- s #static risk pred model
+    
+    data$int_betarev <- 0
+    data$age2_betarev <- 0
+    data$age3_betarev <- 0
+    data$RIAGENDR_betarev <- 0
+    data$DIQ175A_betarev <- 0
+    data$BMI2_betarev <- 0
+    data$BMI3_betarev <- 0
+    data$bp_betarev <- 0
+    data$HDL_betarev <- 0
+    data$trig_betarev <- 0
+    data$glucose_betarev <- 0
+    data$Zhatup <- data$Zhat
+    data$riskup <- data$risk
+    data$Aup <- data$A
+    data$Zprobup <- data$Zprob
+    data$Zrealup <- data$Zreal
+    
+    #fit a log reg and update linear predictor
+    for(i in 200:(nrow(data)-1)) {
+  
+      #revise (fit a new regression model)
+revise <- glm(Zrealup~age+RIAGENDR+DIQ175A+BMI+bp+HDL+trig+glucose, family = "binomial", data=data[1:i,], subset = Aup==0)
+
+  #new models betas after shrinkage
+#data$Zhatrev[i+1] <- predict(revise, newdata=data[i+1,])
+data$int_betarev[i+1] <- tryCatch((-5.517)+data$s[i+1]*(revise$coefficients[[1]]-(-5.517)), error = function(e) return(-5.517))
+data$age2_betarev[i+1] <- tryCatch((-0.018)+data$s[i+1]*(revise$coefficients[[2]]-(-0.018)), error = function(e) return(-0.018))
+data$age3_betarev[i+1] <- tryCatch((-0.081)+data$s[i+1]*(revise$coefficients[[3]]-(-0.081)), error = function(e) return(-0.081))
+data$RIAGENDR_betarev[i+1] <- tryCatch((-0.010)+data$s[i+1]*(revise$coefficients[[4]]-(-0.010)), error = function(e) return(-0.010))
+data$DIQ175A_betarev[i+1] <- tryCatch((0.565)+data$s[i+1]*(revise$coefficients[[5]]-(0.565)), error = function(e) return(0.565))
+data$BMI2_betarev[i+1] <- tryCatch((0.301)+data$s[i+1]*(revise$coefficients[[6]]-(0.301)), error = function(e) return(0.301))
+data$BMI3_betarev[i+1] <- tryCatch((0.92)+data$s[i+1]*(revise$coefficients[[7]]-(0.92)), error = function(e) return(0.92))
+data$bp_betarev[i+1] <- tryCatch((0.498)+data$s[i+1]*(revise$coefficients[[8]]-(0.498)), error = function(e) return(0.498))
+data$HDL_betarev[i+1] <- tryCatch((0.944)+data$s[i+1]*(revise$coefficients[[9]]-(0.944)), error = function(e) return(0.944))
+data$trig_betarev[i+1] <- tryCatch((0.575)+data$s[i+1]*(revise$coefficients[[10]]-(0.575)), error = function(e) return(0.575))
+data$glucose_betarev[i+1] <- tryCatch((1.980)+data$s[i+1]*(revise$coefficients[[11]]-(1.980)), error = function(e) return(1.980))
+
+data$Zhatup[i+1] <- data$int_betarev[i+1]+data$age2_betarev[i+1]*data$age2[i+1]+data$age3_betarev[i+1]*data$age3[i+1]+data$RIAGENDR_betarev[i+1]*data$RIAGENDR[i+1]+data$DIQ175A_betarev[i+1]*data$DIQ175A[i+1]+data$BMI2_betarev[i+1]*data$BMI2[i+1]+data$BMI3_betarev[i+1]*data$BMI3[i+1]+data$bp_betarev[i+1]*data$bp[i+1]+data$HDL_betarev[i+1]*data$HDL[i+1]+data$trig_betarev[i+1]*data$trig[i+1]+data$glucose_betarev[i+1]*data$glucose[i+1]
+      
+      data$c[i+1] <- max((sum(data$Aup[1:i])/data$id[i])-p, 0)
+      data$riskup[i+1] <- (1/(1+exp(-data$Zhatup[i+1])))-data$c[i+1]
+      data$Aup[i+1] <- ifelse(data$riskup[i+1]>=0, 1, 0)
+      data$Zprobup[i+1] <- (1/(1+exp(-(0.5*data$Zhatup[i+1]+0.5))))-.2*data$Aup[i+1]
+
+      data$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data$Zprobup[i+1])
+    }
+    
+    datarecal[[k]] <- data
+    
+  }
+
+datas0.5rev <- data.frame(datarecal[[1]]$c)
+colnames(datas0.5rev) <- c('c') 
+
+```
+
+```{r}
+#data pre processing
+
+datas0$id <- 1:3500
+datas0.5$id <- 1:3500
+datas1$id <- 1:3500
+datas0.5rev$id <- 1:3500
+
+datas0$s <- "0"
+datas0.5$s <- "0.5"
+datas1$s <- "1"
+datas0.5rev$s <- "0.5 (Revision)"
+
+datas0$s <- "0 (Recalibration)"
+datas0.5$s <- "0.5 (Recalibration)"
+datas1$s <- "1 (Recalibration)"
+datas0.5rev$s <- "0.5 (Revision)"
+
+```
+
+```{r}
+data <- rbind(datas0,datas0.5,datas1)
+data$s <- as.factor(data$s)
+```
+
+
+```{r}
+library(ggsci)
+
+ggplot(data, aes(x=id, y=a, color=s)) + geom_point() + theme_linedraw() + scale_color_lancet() + geom_hline(yintercept=0.5, linetype="dashed", color = "red")  + guides(color = guide_legend(title = "Shrinkage Factor")) + xlab("patient count") + ylab(expression(gamma[0]))  + theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(filename= "slopeplot.pdf", plot = last_plot(), path = "/Users/valerieodeh/Library/CloudStorage/OneDrive-UW-Madison/R codes")
+```
+```{r}
+ggplot(data, aes(x=id, y=b, color=s)) + geom_point() + theme_linedraw() + scale_color_lancet()+ geom_hline(yintercept=0.5, linetype="dashed", color = "red") + guides(color = guide_legend(title = "Shrinkage Factor")) + xlab("patient count") + ylab(expression(gamma[1]))  + theme(plot.title = element_text(hjust = 0.5))
+
+ggsave(filename= "interceptplot.pdf", plot = last_plot(), path = "/Users/valerieodeh/Library/CloudStorage/OneDrive-UW-Madison/R codes")
+```
+```{r}
+#for cutoff
+datacutoff <- rbind(datas0[,3:5],datas0.5[,3:5],datas1[,3:5],datas0.5rev)
+datacutoff$s <- factor(datacutoff$s, levels = c("0 (Recalibration)", "0.5 (Recalibration)", "1 (Recalibration)", "0.5 (Revision)"))
+
+```
+
+```{r}
+ggplot(datacutoff, aes(x=id, y=c, color=s)) + geom_point() + theme_linedraw() + scale_color_lancet() + guides(color = guide_legend(title = "Shrinkage Factor")) + xlab("patient count") + ylab(expression(cutoff)) + theme(plot.title = element_text(hjust = 0.5)) + ylim(0,0.25) 
+
+ggsave(filename= "cutoffplot.pdf", plot = last_plot(), path = "/Users/valerieodeh/Library/CloudStorage/OneDrive-UW-Madison/R codes")
+```

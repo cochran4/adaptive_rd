@@ -1,0 +1,278 @@
+---
+title: "NHANES diabetes"
+author: "Valerie Odeh"
+date: "12/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(foreign)
+library(tidyverse)
+library(mice)
+library(dplyr)
+library(rdlocrand)
+library(gee)
+library(lmtest)
+```
+
+# NHANES DATA 2017-2018
+```{r}
+#set working directory
+file=setwd("/Users/valerieodeh/Documents/Research/HealthSystems/NHANES2017-2018")
+
+getwd()
+
+demo <- read.xport(file="DEMO_J.XPT")
+bpx <- read.xport(file="BPX_J.XPT")
+diq <- read.xport(file="DIQ_J.XPT")
+bpq <- read.xport(file="BPQ_J.XPT")
+hdl <- read.xport(file="HDL_J.XPT")
+trigly <- read.xport(file="TRIGLY_J.XPT")
+bmx <- read.xport(file="BMX_J.XPT")
+glu <- read.xport(file="GLU_J.XPT")
+```
+
+
+```{r}
+#put all data frames into list
+df_list <- list(demo, bpx, diq, bpq, hdl, trigly, bmx, glu)      
+
+#merge all data frames together
+NHANES <- df_list %>% reduce(full_join, by='SEQN')
+#NHANES <- df_list %>% reduce(merge, by='SEQN', all=FALSE)
+```
+
+```{r}
+data <- NHANES[,c("RIDAGEYR", "RIAGENDR", "BPXSY1", "BPXDI1","BPQ050A", "LBXGLU", "LBDHDD", "LBXTR", "BMXBMI", "DIQ010", "DIQ175A")]
+
+data <- subset(data, RIDAGEYR>=45 & RIDAGEYR<=65) #between 45 and 65 years old (middle aged)
+data <- subset(data, DIQ010=="2") #no diab initially
+```
+
+```{r}
+#data cleaning 
+
+#gender #1=male(ref), 2=female ---> change to 1=male(ref), 0=female
+data$RIAGENDR <- ifelse(data$RIAGENDR=="1",1,0)
+
+#BP meds #1=yes(ref), 2=no ---> change to 1=yes(ref), 0=no
+data$BPQ050A <- ifelse(data$BPQ050A=="1",1,0)
+
+#diabetes family history #10=yes(ref) ---> change to 1=yes(ref), 0=no
+data$DIQ175A<- ifelse(data$DIQ175A=="10",1,0)
+data$DIQ175A[is.na(data$DIQ175A)] <- 0
+str(data)
+```
+
+```{r}
+#data imputation
+set.seed(1)
+imputed <- mice(data)
+data <- complete(imputed)
+```
+
+# 7-year risk of diabetes type 2
+
+```{r}
+#for risk calc:
+
+#age categories
+data$age1 <- ifelse(data$RIDAGEYR < 50, 1, 0)
+data$age2 <- ifelse(data$RIDAGEYR >= 50 & data$RIDAGEYR < 65, 1, 0)
+data$age3 <- ifelse(data$RIDAGEYR >= 65, 1, 0)
+data$age <- ifelse(data$age1 == 1, 1, ifelse(data$age2 == 1, 2, 3)) #general cat for revision
+data$age <- as.factor(data$age) #make age cat
+#BMI categories
+data$BMI1 <- ifelse(data$BMXBMI < 25, 1, 0)
+data$BMI2 <- ifelse(data$BMXBMI >= 25 & data$BMXBMI < 30, 1, 0)
+data$BMI3 <- ifelse(data$BMXBMI >= 30, 1, 0)
+data$BMI <- ifelse(data$BMI1 == 1, 1, ifelse(data$BMI2 == 1, 2, 3)) #general cat for revision
+data$BMI <- as.factor(data$BMI) #make BMI cat
+#HDL categories
+data$HDL <- ifelse((data$RIAGENDR == 1 & data$LBDHDD < 40) | (data$RIAGENDR == 0 & data$LBDHDD < 50), 1, 0)
+#triglyceride
+data$trig <- ifelse(data$LBXTR >= 150, 1, 0)
+#fasting glucose
+data$glucose <- ifelse(data$LBXGLU >= 100, 1, 0)
+#blood pressure
+data$bp <- ifelse(data$BPXSY1 >= 130 | data$BPXDI1 >=85 | data$BPQ050A == 1, 1, 0)
+```
+
+
+```{r}
+#cutoff selection
+data$id <- seq(1, nrow(data))
+c <- .3 #fixed cutoff
+
+
+#risk score
+data$Zhat <- -5.517-0.018*data$age2-0.081*data$age3-0.010*data$RIAGENDR+0.565*data$DIQ175A+0.301*data$BMI2+0.92*data$BMI3+0.498*data$bp+0.944*data$HDL+0.575*data$trig+1.980*data$glucose
+
+data$risk <- (1/(1+exp(-data$Zhat)))-c
+
+#treatment assignment 
+data$A <- ifelse(data$risk>=0, 1, 0)
+table(data$A)
+```
+
+
+```{r}
+data2 <- data # for case 2- revision: Janssen et al. Method 4
+```
+
+
+
+```{r}
+#create synthetic diabetes output in 6 years (did the patient end up getting diab or not)
+
+#data$Zprob <- 1/(1+exp(-3.267-0.02*data$age2-0.0876*data$age3-0.027*data$RIAGENDR+0.787*data$DIQ175A+0.72*data$BMI2+1.2*data$BMI3+0.5*data$bp+1.7*data$HDL+1.93*data$trig+3.123*data$glucose))
+
+data2$Zprob <- ifelse(data2$A == 1, 1/(1+exp(-(0.5*data2$Zhat+0.5-2))), 1/(1+exp(-(0.5*data2$Zhat+0.5))))
+               
+set.seed(1)
+data2$Zreal <- rbinom(n=nrow(data2), size = 1, prob = data2$Zprob)
+table(data2$Zreal)
+```
+
+#Janssen et al. recalibration method
+Start with first 200 (has to be a larger sample size in this case) samples and recalibrate for every sample after that:
+```{r}
+set.seed(1)
+#initialize for calibration stage
+data2$a <- 0
+data2$b <- 0
+
+#initialize for revise stage
+data2$s <- 0
+data2$int_betarev <- 0
+data2$age2_betarev <- 0
+data2$age3_betarev <- 0
+data2$RIAGENDR_betarev <- 0
+data2$DIQ175A_betarev <- 0
+data2$BMI2_betarev <- 0
+data2$BMI3_betarev <- 0
+data2$bp_betarev <- 0
+data2$HDL_betarev <- 0
+data2$trig_betarev <- 0
+data2$glucose_betarev <- 0
+data2$Zhatup <- data2$Zhat
+data2$riskup <- data2$risk
+data2$Aup <- data2$A
+data2$Zprobup <- data2$Zprob
+data2$Zrealup <- data2$Zreal
+
+
+
+#fit a log reg and update linear predictor
+for(i in 100:(nrow(data2)-1)) {
+  #calibrate (we need this to shrink coeff towards recal values since we do not have a derivation step)
+calibrate <- glm(Zrealup~Zhatup, family = "binomial", data = data2[1:i,])
+data2$a[i+1] <- calibrate$coefficients[[1]]
+data2$b[i+1] <- calibrate$coefficients[[2]]
+
+  #revise (fit a new regression model)
+revise <- glm(Zrealup~age+RIAGENDR+DIQ175A+BMI+bp+HDL+trig+glucose+Aup, family = "binomial", data=data2[1:i,])
+#data2$Zhatrevise[i+1] <- predict(revise, newdata=data2[i+1,])
+#data2$a_revise[i+1] <- revise$coefficients[[1]]
+#data2$age2_revise[i+1] <- revise$coefficients[[2]]
+#data2$age3_revise[i+1] <- revise$coefficients[[3]]
+#data2$RIAGENDR_revise[i+1] <- revise$coefficients[[4]]
+#data2$DIQ175A_revise[i+1] <- revise$coefficients[[5]]
+#data2$BMI2_revise[i+1] <- revise$coefficients[[6]]
+#data2$BMI3_revise[i+1] <- revise$coefficients[[7]]
+#data2$bp_revise[i+1] <- revise$coefficients[[8]]
+#data2$HDL_revise[i+1] <- revise$coefficients[[9]]
+#data2$trig_revise[i+1] <- revise$coefficients[[10]]
+#data2$glucose_revise[i+1] <- revise$coefficients[[11]]
+  
+  #skrinkage towards recalibrated coefficients
+lrt <- lrtest(revise,calibrate) #(likelihood ratio test to compare new model and recal model)
+data2$s[i+1] <- (lrt$Chisq[[2]]-lrt$Df[[2]])/lrt$Chisq[[2]]
+
+  #new models betas after shrinkage
+#data2$Zhatrev[i+1] <- predict(revise, newdata=data2[i+1,])
+data2$int_betarev[i+1] <- (-5.517*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[1]]-(-5.517*data2$b[i+1]))
+data2$age2_betarev[i+1] <- (-0.018*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[2]]-(-0.018*data2$b[i+1]))
+data2$age3_betarev[i+1] <- (-0.081*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[3]]-(-0.081*data2$b[i+1]))
+data2$RIAGENDR_betarev[i+1] <- (-0.010*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[4]]-(-0.010*data2$b[i+1]))
+data2$DIQ175A_betarev[i+1] <- (0.565*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[5]]-(0.565*data2$b[i+1]))
+data2$BMI2_betarev[i+1] <- (0.301*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[6]]-(0.301*data2$b[i+1]))
+data2$BMI3_betarev[i+1] <- (0.92*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[7]]-(0.92*data2$b[i+1]))
+data2$bp_betarev[i+1] <- (0.498*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[8]]-(0.498*data2$b[i+1]))
+data2$HDL_betarev[i+1] <- (0.944*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[9]]-(0.944*data2$b[i+1]))
+data2$trig_betarev[i+1] <- (0.575*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[10]]-(0.575*data2$b[i+1]))
+data2$glucose_betarev[i+1] <- (1.980*data2$b[i+1])+data2$s[i+1]*(revise$coefficients[[11]]-(1.980*data2$b[i+1]))
+
+data2$Zhatup[i+1] <- data2$int_betarev[i+1]+data2$age2_betarev[i+1]*data2$age2[i+1]+data2$age3_betarev[i+1]*data2$age3[i+1]+data2$RIAGENDR_betarev[i+1]*data2$RIAGENDR[i+1]+data2$DIQ175A_betarev[i+1]*data2$DIQ175A[i+1]+data2$BMI2_betarev[i+1]*data2$BMI2[i+1]+data2$BMI3_betarev[i+1]*data2$BMI3[i+1]+data2$bp_betarev[i+1]*data2$bp[i+1]+data2$HDL_betarev[i+1]*data2$HDL[i+1]+data2$trig_betarev[i+1]*data2$trig[i+1]+data2$glucose_betarev[i+1]*data2$glucose[i+1] 
+
+data2$riskup[i+1] <- (1/(1+exp(-data2$Zhatup[i+1])))-c
+data2$Aup[i+1] <- ifelse(data2$riskup[i+1]>=0, 1, 0)
+data2$Zprobup[i+1] <- ifelse(data2$Aup[i+1] == 1, 1/(1+exp(-(0.5*data2$Zhatup[i+1]+0.5-2))), 1/(1+exp(-(0.5*data2$Zhatup[i+1]+0.5))))
+data2$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data2$Zprobup[i+1])
+
+
+}
+
+```
+
+
+
+#Simpler revision method to use
+Start with first 200 (has to be a larger sample size in this case) samples and recalibrate for every sample after that:
+```{r}
+set.seed(1)
+
+#initialize for revise stage
+data2$s <- 1 #revised regression coefficients
+#data2$s <- 0 #original regression coefficients
+#data2$s <- data2$id/nrow(data2) #varying shrinkage
+
+data2$int_betarev <- 0
+data2$age2_betarev <- 0
+data2$age3_betarev <- 0
+data2$RIAGENDR_betarev <- 0
+data2$DIQ175A_betarev <- 0
+data2$BMI2_betarev <- 0
+data2$BMI3_betarev <- 0
+data2$bp_betarev <- 0
+data2$HDL_betarev <- 0
+data2$trig_betarev <- 0
+data2$glucose_betarev <- 0
+data2$Zhatup <- data2$Zhat
+data2$riskup <- data2$risk
+data2$Aup <- data2$A
+data2$Zprobup <- data2$Zprob
+data2$Zrealup <- data2$Zreal
+
+
+
+#fit a log reg and update linear predictor
+for(i in 200:(nrow(data2)-1)) {
+
+  #revise (fit a new regression model)
+revise <- glm(Zrealup~age+RIAGENDR+DIQ175A+BMI+bp+HDL+trig+glucose+Aup, family = "binomial", data=data2[1:i,])
+
+  #new models betas after shrinkage
+#data2$Zhatrev[i+1] <- predict(revise, newdata=data2[i+1,])
+data2$int_betarev[i+1] <- (-5.517)+data2$s[i+1]*(revise$coefficients[[1]]-(-5.517))
+data2$age2_betarev[i+1] <- (-0.018)+data2$s[i+1]*(revise$coefficients[[2]]-(-0.018))
+data2$age3_betarev[i+1] <- (-0.081)+data2$s[i+1]*(revise$coefficients[[3]]-(-0.081))
+data2$RIAGENDR_betarev[i+1] <- (-0.010)+data2$s[i+1]*(revise$coefficients[[4]]-(-0.010))
+data2$DIQ175A_betarev[i+1] <- (0.565)+data2$s[i+1]*(revise$coefficients[[5]]-(0.565))
+data2$BMI2_betarev[i+1] <- (0.301)+data2$s[i+1]*(revise$coefficients[[6]]-(0.301))
+data2$BMI3_betarev[i+1] <- (0.92)+data2$s[i+1]*(revise$coefficients[[7]]-(0.92))
+data2$bp_betarev[i+1] <- (0.498)+data2$s[i+1]*(revise$coefficients[[8]]-(0.498))
+data2$HDL_betarev[i+1] <- (0.944)+data2$s[i+1]*(revise$coefficients[[9]]-(0.944))
+data2$trig_betarev[i+1] <- (0.575)+data2$s[i+1]*(revise$coefficients[[10]]-(0.575))
+data2$glucose_betarev[i+1] <- (1.980)+data2$s[i+1]*(revise$coefficients[[11]]-(1.980))
+
+data2$Zhatup[i+1] <- data2$int_betarev[i+1]+data2$age2_betarev[i+1]*data2$age2[i+1]+data2$age3_betarev[i+1]*data2$age3[i+1]+data2$RIAGENDR_betarev[i+1]*data2$RIAGENDR[i+1]+data2$DIQ175A_betarev[i+1]*data2$DIQ175A[i+1]+data2$BMI2_betarev[i+1]*data2$BMI2[i+1]+data2$BMI3_betarev[i+1]*data2$BMI3[i+1]+data2$bp_betarev[i+1]*data2$bp[i+1]+data2$HDL_betarev[i+1]*data2$HDL[i+1]+data2$trig_betarev[i+1]*data2$trig[i+1]+data2$glucose_betarev[i+1]*data2$glucose[i+1] 
+
+data2$riskup[i+1] <- (1/(1+exp(-data2$Zhatup[i+1])))-c
+data2$Aup[i+1] <- ifelse(data2$riskup[i+1]>=0, 1, 0)
+data2$Zprobup[i+1] <- ifelse(data2$Aup[i+1] == 1, 1/(1+exp(-(0.5*data2$Zhatup[i+1]+0.5-2))), 1/(1+exp(-(0.5*data2$Zhatup[i+1]+0.5))))
+data2$Zrealup[i+1] <- rbinom(n=1, size = 1, prob = data2$Zprobup[i+1])
+
+}
+
+```

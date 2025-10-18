@@ -1,0 +1,194 @@
+# OLD
+
+## Simulation scenarios
+
+### Threshold adaptation methods
+
+We compare three approaches to setting a treatment threshold based on baseline PCE risk:
+
+1.  **Current clinical guideline (7.5%)** — the standard PCE threshold used in ASCVD prevention guidelines to recommend statin therapy.
+
+2.  **Quantile-based adaptation** — chooses a threshold so that a fixed proportion of the cohort (e.g., 10%) receives treatment, regardless of absolute risk levels.
+
+3.  **NNT-based adaptation** — uses an assumed treatment effect function to determine the number needed to treat (NNT) at each risk level, and selects the threshold that achieves a target NNT (e.g., 20), subject to minimum and maximum treatment rates.
+
+These methods illustrate how different adaptation rules can produce substantially different treatment thresholds and treatment rates in the same population.
+
+```{r}
+
+# ------------------------------------------------------------
+# Threshold adaptation method constructors
+# ------------------------------------------------------------
+
+initial_threshold <- .075
+
+# 1) Fixed / guideline threshold (no adaptation)
+threshold_method_fixed <- list(type = "none", initial_threshold = initial_threshold)
+
+
+# 2) Quantile-based adaptation: set threshold so that a fraction is treated
+threshold_method_quantile <- list(
+     type               = "quantile",
+     initial_threshold  = initial_threshold,
+     desired_treat_rate = 0.30
+  )
+
+# 3) NNT-based adaptation: pick threshold to hit target NNT
+#    te_fn: function(risk) -> treatment effect
+threshold_method_nnt <- function(te_fn,
+                                 desired_nnt,
+                                 min_treat_rate = 0,
+                                 max_treat_rate = 1,
+                                 initial_threshold = NA_real_) {
+  list(
+    type                 = "nnt",
+    initial_threshold    = initial_threshold,
+    treatment_effect_fn  = te_fn,
+    desired_nnt          = desired_nnt,
+    min_treat_rate       = min_treat_rate,
+    max_treat_rate       = max_treat_rate
+  )
+}
+
+```
+
+### Model adaptation methods
+
+We compare
+
+```{r}
+
+# 1) No adaptation (fixed model)
+model_method_none <- list(type = "none")
+
+```
+
+### Outcome distributions
+
+We consider three simulated outcomes, each with parameters chosen for illustration:
+
+1.  **Referral completion** — a binary outcome modeled using a linear probability model, where treatment increases the probability of completing a referral both by a fixed amount and proportionally to baseline risk. In terms of the variables in the paper, this means $$ \mathbb{P}\left(  Y_i = 1 | A_i = a, X_i = x \right) = \alpha_0 + \alpha_1 \bar{R}_{i,1} + a(\beta_0 + \beta_1 \bar{R}_{i,1})  $$ where $A_i$ is the treatment assignment of patient $i$, $X_i$ are their covariates, $Y_i$ is their outcome (referral completion or not), and $\bar{R}_{i,1}$ is their predicted risk using the original risk prediction model, a function of their covariates.
+
+2.  **Follow-up systolic blood pressure** — a continuous outcome where follow-up BP depends on baseline BP, a drift term, and treatment effects that scale with deviation from 120 mmHg.
+
+3.  **Cardiovascular event** — a binary outcome where event probability depends on baseline Pooled Cohort Equation (PCE) risk, with a small correction for participants in the “Other” race/sex group, and treatment effects that scale with risk.
+
+*All parameters are illustrative and not based on real effect estimates.*
+
+```{r}
+
+# --- Outcome 1: Referral completion ---------------------------------
+
+# Parameters
+referral_params <- list(
+  treatment_effect_intercept = 0.25,
+  treatment_effect_slope     = 0.10,
+  reference_intercept        = 0.00,
+  reference_slope            = 0.10
+)
+
+# Simulate referral completion (0/1)
+outcome_referral <- function(cohort_df, idx, risk_baseline, treat, params = referral_params) {
+  # Linear probability model
+  p <- params$reference_intercept +
+       params$reference_slope * risk_baseline +
+       treat * (params$treatment_effect_intercept +
+                params$treatment_effect_slope * risk_baseline)
+
+  # Clamp to [0, 1]
+  p <- pmax(0, pmin(1, p))
+
+  stats::rbinom(n = length(idx), size = 1, prob = p)
+}
+
+
+# --- Outcome 2: Follow-up systolic blood pressure --------------------
+
+# Parameters
+bp_params <- list(
+  treatment_effect_intercept = -2.00,  # shift for treated
+  treatment_effect_slope     = -0.10,  # effect scales with (baseline_sbp - 120)
+  reference_intercept        =  0.00,  # baseline drift
+  reference_slope            =  1.00,  # dependence on baseline_sbp
+  within_sd                  =  8.00   # residual SD
+)
+
+# Simulate follow-up SBP (continuous)
+outcome_bp <- function(cohort_df, idx, risk_baseline, treat, params = bp_params) {
+  
+  # Baseline SBP from the seed dataset
+  baseline_sbp <- exp(cohort_df$ln_treated_BP[idx] + cohort_df$ln_untreated_BP[idx])
+
+  # Mean follow-up SBP
+  mu <- params$reference_intercept +
+        params$reference_slope * baseline_sbp +
+        treat * (params$treatment_effect_intercept +
+                 params$treatment_effect_slope * (baseline_sbp - 120))
+ print(mean(mu))
+  stats::rnorm(n = length(idx), mean = mu, sd = params$within_sd)
+}
+
+# --- Outcome 3: Cardiovascular event --------------------
+
+# Parameters
+cvd_params <- list(
+  treatment_effect_intercept = 0.02,
+  treatment_effect_slope     = 0.20,
+  reference_intercept        = 0.01,
+  reference_slope            = 0.98
+)
+
+# Simulate cardiovascular event (0/1)
+outcome_cvd <- function(cohort_df, idx, risk_baseline, treat, params = cvd_params) {
+  
+  # Incorrect risk for "Other" group
+  group <- cohort_df$group[idx]
+  other <- as.numeric(group %in% c("Other_F", "Other_M"))
+  risk_baseline[other] <- risk_baseline[other]*.95 + .05
+  
+  # Linear probability model
+  p <- params$reference_intercept +
+       params$reference_slope * risk_baseline +
+       treat * (params$treatment_effect_intercept +
+                params$treatment_effect_slope * risk_baseline)
+
+  # Clamp to [0, 1]
+  p <- pmax(0, pmin(1, p))
+
+  stats::rbinom(n = length(idx), size = 1, prob = p)
+}
+
+```
+
+## Simulation
+
+```{r}
+#--- run the simulation ----
+sim_out <- simulate_design(
+  cohort_df              = cohort_df,
+  risk_fn                = pce_predict,
+  model_state            = NULL,
+  initial_block_size     = 2000,   # warm-up
+  block_size             = 400,   # subsequent blocks
+  n_blocks               = 0,     # total post–warm-up blocks
+  threshold_adapt_method = threshold_method_quantile,
+  model_adapt_method     = model_method_none,
+  outcome_fn             = outcome_referral
+)
+
+# results tibble per block
+res <- sim_out$results
+
+# quick summaries
+treat_by_block <- res |>
+  dplyr::group_by(block) |>
+  dplyr::summarise(
+    n        = dplyr::n(),
+    treated = round(100 * mean(treat), 1),
+    outcome = round(100 * mean(outcome), 1),
+    threshold = dplyr::first(round(threshold_used*1000)/1000)
+  )
+
+knitr::kable(treat_by_block, caption = "Block-level treatment and outcome rates with threshold used")
+
+```

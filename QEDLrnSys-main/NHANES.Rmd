@@ -1,0 +1,349 @@
+---
+title: "NHANES"
+author: "Valerie Odeh"
+date: "12/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(foreign)
+library(tidyverse)
+library(mice)
+library(dplyr)
+library(rdlocrand)
+library(gee)
+```
+
+# NHANES DATA
+```{r}
+#set working directory
+file=setwd("/Users/valerieodeh/Documents/Research/HealthSystems/NHANES")
+
+getwd()
+
+demo <- read.xport(file="P_DEMO.XPT")
+bpxo <- read.xport(file="P_BPXO.XPT")
+tchol <- read.xport(file="P_TCHOL.XPT")
+hdl <- read.xport(file="P_HDL.XPT")
+smq <- read.xport(file="P_SMQ.XPT")
+bpq <- read.xport(file="P_BPQ.XPT")
+mcq <- read.xport(file="P_MCQ.XPT")
+diq <- read.xport(file="P_DIQ.XPT")
+```
+
+
+```{r}
+#put all data frames into list
+df_list <- list(demo, bpxo, tchol, hdl, smq, bpq, diq, mcq)      
+
+#merge all data frames together
+NHANES <- df_list %>% reduce(full_join, by='SEQN')
+#NHANES <- df_list %>% reduce(merge, by='SEQN', all=FALSE)
+```
+
+```{r}
+data <- NHANES[,c("RIDAGEYR", "RIAGENDR", "BPXOSY1", "LBXTC", "LBDHDD", "SMQ040", "BPQ050A", "DIQ010", "MCQ160C")]
+
+data <- subset(data, RIDAGEYR>30 & RIDAGEYR<79) #between 30 and 79 years old
+data <- subset(data, MCQ160C=="2" & DIQ010=="2") #no diab, no coronary heart disease
+
+```
+
+```{r}
+#data cleaning 
+
+#gender #1=male(ref), 2=female ---> change to 1=male(ref), 0=female
+data$RIAGENDR <- ifelse(data$RIAGENDR=="1",1,0)
+
+#smoker #1=everyday, 2=somedays, 3=no ---> change to 1=everyday or somedays, 0=no
+
+data$SMQ040 <- ifelse(data$SMQ040=="3",0,1)
+
+
+#BP meds #1=yes(ref), 2=no ---> change to 1=yes(ref), 0=no
+data$BPQ050A <- ifelse(data$BPQ050A=="1",1,0)
+
+str(data)
+```
+
+
+
+
+```{r}
+#data imputation
+set.seed(1)
+imputed <- mice(data)
+data <- complete(imputed)
+```
+
+# Framingham Risk Score for Hard Coronary Heart Disease
+
+```{r}
+#2=female
+datawomen <- subset(data, RIAGENDR==0)
+#Women: if age >78, use ln(78) x Smoker
+datawomen <- datawomen %>% mutate(ageR = RIDAGEYR)
+datawomen$ageR[datawomen$ageR>78] <- 78
+
+#Risk calc
+datawomen <- datawomen %>% mutate(lrisk = 31.764001*log(RIDAGEYR) + 22.465206*log(LBXTC) - 1.187731*log(LBDHDD) + 2.552905*log(BPXOSY1) + 0.420251*BPQ050A + 13.07543*SMQ040 - 5.060998*log(RIDAGEYR)*log(LBXTC) - 2.996945*log(ageR)*SMQ040 - 146.5933061)
+
+datawomen <- datawomen %>% mutate(risk =1 - 0.98767^exp(lrisk) )
+```
+
+
+```{r}
+#1=male
+datamen <- subset(data, RIAGENDR==1)
+#Men: if age >70, use ln(70) x Smoker.
+datamen <- datamen %>% mutate(ageR = RIDAGEYR)
+datamen$ageR[datamen$ageR>70] <- 70
+
+#Risk calc
+datamen <- datamen %>% mutate(lrisk = 52.00961*log(RIDAGEYR) + 20.014077*log(LBXTC) - 0.905964*log(LBDHDD) + 1.305784*log(BPXOSY1) + 0.241549*BPQ050A + 12.096316*SMQ040 - 4.605038*log(RIDAGEYR)*log(LBXTC) - 2.84367*log(ageR)*SMQ040 - 2.93323*log(RIDAGEYR)*log(RIDAGEYR)- 172.300168)
+
+datamen <- datamen %>% mutate(risk =1 - 0.9402^exp(lrisk) )
+```
+
+
+```{r}
+#join datasets
+
+datafinal <- rbind(datawomen, datamen)
+
+#create assignment variable
+summary(datafinal$risk)
+#cutoff = 18%
+#center @ 18%
+datafinal$risk0 <- datafinal$risk-0.18 
+datafinal$risk0n <- datafinal$risk0 +rnorm(nrow(datafinal)) #add noise
+datafinal$A <- ifelse(datafinal$risk0n>=0, 1, 0) #assignment, cutoff=0
+table(datafinal$A)
+
+#create outcome variable
+datafinal$Y <-datafinal$RIDAGEYR+datafinal$RIAGENDR+datafinal$BPXOSY1+datafinal$LBXTC+datafinal$LBDHDD+datafinal$SMQ040+datafinal$BPQ050A+4*datafinal$A+rnorm(n=nrow(datafinal)) 
+
+#eliminate columns we no longer need (diabetes, coronary heart disease, column use to calc risk)
+datafinal <- select(datafinal, -c("DIQ010","MCQ160C","ageR", "lrisk"))
+```
+
+```{r}
+#data centered
+
+#datacenter <- datafinal
+#datacenter$RIDAGEYR <- (datacenter$RIDAGEYR-mean(datacenter$RIDAGEYR))/sd(datacenter$RIDAGEYR)
+#datacenter$BPXOSY1 <- (datacenter$BPXOSY1-mean(datacenter$BPXOSY1))/sd(datacenter$BPXOSY1)
+#datacenter$LBXTC <- (datacenter$LBXTC-mean(datacenter$LBXTC))/sd(datacenter$LBXTC)
+#datacenter$LBDHDD <- (datacenter$LBDHDD-mean(datacenter$LBDHDD))/sd(datacenter$LBDHDD)
+```
+
+
+```{r}
+datafinal$RIAGENDR<- as.factor(datafinal$RIAGENDR)
+levels(datafinal$RIAGENDR) <- c("Female", "Male")
+
+datafinal$SMQ040<- as.factor(datafinal$SMQ040)
+levels(datafinal$SMQ040) <- c("No", "Yes")
+
+datafinal$BPQ050A<- as.factor(datafinal$BPQ050A)
+levels(datafinal$BPQ050A) <- c("No", "Yes")
+
+datafinal$A<- as.factor(datafinal$A)
+levels(datafinal$A) <- c("No", "Yes")
+
+str(datafinal)
+```
+
+```{r}
+table(datafinal$A)
+```
+
+
+```{r}
+#window 
+#0.05 each way (for now)
+
+wsel <- function(data=data, z=0.05) {
+
+data=data
+data$w <- ifelse(data$risk0>=-z & data$risk0<=z, 1, 0) #ask Amy noise or not
+
+data[data$w==1,]
+
+}
+
+datawindow <- wsel(data=datafinal, z=0.05) #or datacenter
+```
+
+```{r}
+table(datawindow$A)
+```
+
+
+```{r}
+
+#propensity score
+# fit logistic regression
+PS_logit <- glm(A ~ risk0, data = datawindow, 
+                family = "binomial")
+summary(PS_logit)
+
+
+#glm.fit: algorithm did not convergeglm.fit: fitted probabilities numerically 0 or 1 occurred
+#problem with separation
+#try with firth logistic regression (?)
+library(logistf)
+logistf(A ~ risk0, data = datawindow)
+
+# calculate predicted propensity scores
+predict(PS_logit, type = "response")
+datawindow$ps <- predict(PS_logit, type = "link") #logit
+
+plot(datawindow$A,datawindow$risk0)
+
+
+#Regress Y as function of A and propensity
+#build a model that predicts A as a fcn of R (prop of A given R--- build log reg and use as cov) + X (for var)
+
+summary(lm(Y~ps+A, data=datawindow))
+
+summary(lm(Y~ps+A+RIDAGEYR+RIAGENDR+BPXOSY1+LBXTC+LBDHDD+SMQ040+BPQ050A, data=datawindow))
+```
+
+
+
+
+
+
+```{r}
+
+#propensity score
+# fit logistic regression
+PS_logit <- glm(A ~ risk0, data = datawindow, 
+                family = "binomial")
+summary(PS_logit)
+
+PS_probit <- PS_logit <- glm(A ~ risk0, data = datawindow, 
+                family = binomial(link = "probit"))
+summary(PS_probit)
+
+
+# calculate predicted propensity scores
+predict(PS_logit, type = "response")
+datawindow$ps <- predict(PS_logit, type = "link") #logit
+# calculate predicted propensity scores
+datawindow$psprob <- predict(PS_probit, type = "link") 
+
+
+
+
+
+
+#Regress Y as function of A and propensity
+#build a model that predicts A as a fcn of R (prop of A given R--- build log reg and use as cov) + X (for var)
+
+summary(lm(Y~ps+A, data=datawindow))
+summary(lm(Y~ps+A, data=datawindow))
+
+summary(lm(Y~ps+A+RIDAGEYR+RIAGENDR+BPXOSY1+LBXTC+LBDHDD+SMQ040+BPQ050A, data=datawindow))
+summary(lm(Y~psprob+A+RIDAGEYR+RIAGENDR+BPXOSY1+LBXTC+LBDHDD+SMQ040+BPQ050A, data=datawindow))
+```
+
+#gee??
+```{r}
+geefit <- gee(Y~ps+A+RIDAGEYR+RIAGENDR+BPXOSY1+LBXTC+LBDHDD+SMQ040+BPQ050A,
+               data = datawindow, 
+               family = binomial,
+               corstr = "independence")
+summary(geefit)
+```
+
+
+
+
+
+#stats
+```{r}
+library(tableone)
+
+factorVars <- c("RIAGENDR", "SMQ040", "BPQ050A", "A")
+vars <- c("RIDAGEYR", "BPXOSY1", "LBXTC", "LBDHDD", "risk")
+```
+
+
+```{r}
+tableOne <- CreateTableOne(vars = vars, data = datafinal, factorVars = factorVars)
+summary(tableOne$ContTable, digits = 4)
+```
+
+```{r}
+tableOne$CatTable
+```
+
+```{r}
+str(datafinal)
+table(datafinal$RIAGENDR)
+table(datafinal$SMQ040)
+table(datafinal$BPQ050A)
+table(datafinal$A)
+
+```
+
+```{r}
+summary(tableOne$CatTable)
+```
+
+```{r}
+print(tableOne$CatTable, quote = TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+#window selection
+#1. select an arbitrary window size
+#2. Conduct a hypothesis test H0: no effect of the treatment on the covariate , for each of the k covariates. Take the minimum p-value from the k tests.
+#3. If the minimum p-value obtained in step 2, p1, is less than some prespecified level— for example, 0.15, the initial window was too large; decrease the initial window and start over. If the initial window cannot be decreased (for example, because a smaller window would contain too few data points), conclude that W cannot be found. Otherwise, if p1 is greater than or eq to 0.15, choose a larger window , and go back to step 2 to calculate . Repeat the process until the minimum p-value is less than 0.15. The selected window is the largest window such that the minimum p-value is larger than or equal to 0.15 in that window and in all windows contained in it.
+
+R <- datafinal$risk0
+X <- as.matrix(select(datafinal, c("RIDAGEYR", "RIAGENDR", "BPXOSY1", "LBXTC", "LBDHDD", "SMQ040","BPQ050A")))
+
+window <- rdwinselect(R,X,wmin=.0001,wstep=.001, reps=500, plot = TRUE, nwindows = 30)
+window$summary
+```
+
+```{r}
+#leave-one-out cross validation for window size
+```
+
+
+```{r}
+summary(datafinal$risk0)
+
+
+0.2645-(-0.18)
+```
+
+
+```{r}
+#window selection
+
+R <- datacenter$risk0
+X <- as.matrix(select(datacenter, c("RIDAGEYR", "RIAGENDR", "BPXOSY1", "LBXTC", "LBDHDD", "SMQ040","BPQ050A")))
+
+window <- rdwinselect(R,X,reps=500,wmin=.0001,wstep=.01, plot = TRUE, nwindow=30)
+```
+
+
+
+
+
