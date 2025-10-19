@@ -37,7 +37,7 @@ A Quarto-generated HTML demo illustrates the method, threshold dynamics, and est
 
 ## NHANES Data (Local Only — Not in Repo)
 
-The simulation uses NHANES 2017–2018 public data to construct a cohort.  
+The simulation uses NHANES 2017-March 2020 Pre-pandemic data to construct a cohort.  
 Download the following `.XPT` files and place them in a local folder named `data_raw/` at the project root (already in `.gitignore`):
 
 Required files:  
@@ -48,7 +48,7 @@ Required files:
 - `P_HDL.XPT`  
 - `P_TCHOL.XPT`  
 - `P_SMQ.XPT`  
-- `P_MCQ.XPT` *(optional)*
+- `P_MCQ.XPT` 
 
 Download from: https://wwwn.cdc.gov/nchs/nhanes/
 
@@ -74,6 +74,8 @@ cohort_df <- build_cohort(nh_list, impute = TRUE)
 
 ## Reproduce the Demo Locally
 
+*The following example illustrates a minimal subset of the full workflow shown in the Quarto demo. It runs a single adaptive simulation and estimates the treatment effect at the final threshold.*
+
 ```r
 # 1) Install/load dependencies and project functions
 source("R/imports.R")
@@ -94,9 +96,18 @@ sim_out <- simulate_design(
   outcome_fn             = outcome_attend
 )
 
+
 # 4) Estimate the local treatment effect at the (adaptive) threshold
 fit_out <- estimate_spline(sim_out, family = binomial())
 compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, attendance_prob)
+
+# 5) Plot conditional means of outcome by risk and treatment group
+plot_spline_curves(
+  fit_out, sim_out, pce_predict, attendance_prob, cohort_df,
+  y_lab  = "Probability of Attendance",
+  labels = c("No Referral", "Referral")
+)
+
 ```
 
 ---
