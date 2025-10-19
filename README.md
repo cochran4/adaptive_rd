@@ -1,120 +1,116 @@
-# adaptive_rd
+# adaptive_rd  
 Designing a quasi-experiment to study the clinical impact of adaptive risk prediction models
 
 ---
 
+**View the Adaptive RD Simulation Demo:**  
+https://cochran4.github.io/adaptive_rd/
+
+---
+
 ## Overview
-This repository contains code, analyses, and documentation used to design and evaluate quasi‑experimental studies that measure the clinical impact of adaptive risk prediction models (models that are periodically retrained/updated in production). The repository includes data‑preparation scripts, simulation code, model training/evaluation code, and a Quarto document with rendered HTML that walk through the simulations reported in the associated paper.
 
-Project site (Quarto): https://cochran4.github.io/adaptive_rd
+This repository accompanies the study:
 
-## Repository layout (expected)
-- README.md — this file
-- data_processed/ — outputs produced by preprocessing scripts (do not commit large derived files)
-- scripts/ or R/ or src/ — preprocessing, model training, and simulation scripts
-- analysis/quarto/ — Quarto source (.qmd) files used to generate the site and HTML
-- docs/ or analysis/quarto/_site/ — rendered HTML pages for the Quarto site
-- results/ — generated figures, tables, and model artifacts
-- configs/ — YAML/JSON configuration files for experiments
-- environment.yml or requirements.txt — environment specification for reproducibility
-- LICENSE — MIT license (present in this repository)
+**Odeh-Couvertier V., Zayas-Cabán G., Patterson B., Cochran A.**  
+*Designing a quasi-experiment to study the clinical impact of adaptive risk prediction models* (Preprint, 2025).
 
-## Handling NHANES data (do not add raw data to the repo)
-NHANES data files must not be committed to the public repository. Instead, place the required NHANES files in a local directory outside the repository and point preprocessing scripts to that directory via a config value or environment variable.
+The project develops and demonstrates a **regression discontinuity (RD)** framework for modern healthcare settings where both the **risk prediction model** and **decision threshold** can adapt over time. Traditional quasi-experimental designs assume fixed policies; here, we simulate adaptive policies and estimate local treatment effects when models are updated or thresholds are tuned (e.g., to target capacity, NNT, or calibration).
 
-Required NHANES files (exact filenames expected by preprocessing):
-- P_DEMO.XPT
-- P_BPXO.XPT
-- P_DIQ.XPT
-- P_BPQ.XPT
-- P_HDL.XPT
-- P_MCQ.XPT    (optional: not used by PCE but safe to include)
-- P_SMQ.XPT
-- P_TCHOL.XPT
+A Quarto-generated HTML demo illustrates the method, threshold dynamics, and estimation results.
 
-Where to download:
-- NHANES data portal: https://wwwn.cdc.gov/nchs/nhanes/
-  - Select the relevant cycle(s) (e.g., 2017‑2018, 2019‑2020, or combined releases) and download the component files above (SAS transport .XPT files).
+---
 
-Recommended pattern: configure a local NHANES directory and add it to your run-time configuration rather than adding files to the repo.
+## Repository Structure
 
-Environment variable approach (example)
-- Set the path to your local NHANES directory:
-  - macOS / Linux / WSL:
-    export NHANES_DIR="/path/to/local/nhanes_files"
-  - Windows (PowerShell):
-    $env:NHANES_DIR = "C:\path\to\local\nhanes_files"
+- `adaptive_rd_demo.qmd` — Main Quarto document with the simulation demonstration and narrative.  
+- `docs/` — GitHub Pages output (landing page `index.html`, demo HTML, assets).  
+- `R/` — Core R source code (data I/O, prediction, threshold/model adaptation, estimation, plotting).  
+- `figures/` — Saved figure objects and panels (`.rds`, `.pdf`) used in the demo/manuscript.  
+- `data_raw/` *(ignored)* — Local-only NHANES `.XPT` files (not tracked).  
+- `LICENSE` — MIT License.  
+- `README.md` — This file.
 
-R example (reading files from NHANES_DIR)
+> **Note:** Raw NHANES data is intentionally excluded. See below for setup.
+
+---
+
+## NHANES Data (Local Only — Not in Repo)
+
+The simulation uses NHANES 2017–2018 public data to construct a cohort.  
+Download the following `.XPT` files and place them in a local folder named `data_raw/` at the project root (already in `.gitignore`):
+
+Required files:  
+- `P_DEMO.XPT`  
+- `P_BPXO.XPT`  
+- `P_DIQ.XPT`  
+- `P_BPQ.XPT`  
+- `P_HDL.XPT`  
+- `P_TCHOL.XPT`  
+- `P_SMQ.XPT`  
+- `P_MCQ.XPT` *(optional)*
+
+Download from: https://wwwn.cdc.gov/nchs/nhanes/
+
+**Example (R):**
+```r
+source("R/imports.R")
+nh_list   <- read_nhanes_2017_2018("data_raw")
+cohort_df <- build_cohort(nh_list, impute = TRUE)
+```
+
+---
+
+## Core Components
+
+- `simulate_design()` — Streams patients through blocks; assigns treatment; adapts threshold/model.  
+- `adapt_threshold.R` — Quantile- and NNT-based adaptive rules.  
+- `adapt_model.R` — Optional model recalibration/revision across blocks.  
+- `estimate_spline()` — Spline-based estimator for the local ATE at the threshold.  
+- `plot.R` — Plotting utilities (threshold trajectory, conditional means, comparisons).  
+- `adaptive_rd_demo.qmd` — End-to-end demonstration (simulation → estimation → visualization).
+
+---
+
+## Reproduce the Demo Locally
 
 ```r
-nhanes_dir <- Sys.getenv("NHANES_DIR")
-demo   <- file.path(nhanes_dir, "P_DEMO.XPT")
-bpx    <- file.path(nhanes_dir, "P_BPXO.XPT")
-diq    <- file.path(nhanes_dir, "P_DIQ.XPT")
-bpq    <- file.path(nhanes_dir, "P_BPQ.XPT")
-hdl    <- file.path(nhanes_dir, "P_HDL.XPT")
-mcq    <- file.path(nhanes_dir, "P_MCQ.XPT")
-smq    <- file.path(nhanes_dir, "P_SMQ.XPT")
-tchol  <- file.path(nhanes_dir, "P_TCHOL.XPT")
+# 1) Install/load dependencies and project functions
+source("R/imports.R")
 
-# e.g. read one file
-library(haven)
-demo_df <- read_xpt(demo)
+# 2) Prepare cohort (requires NHANES files in data_raw/)
+nh_list   <- read_nhanes_2017_2018("data_raw")
+cohort_df <- build_cohort(nh_list)
+
+# 3) Run a sample adaptive simulation
+sim_out <- simulate_design(
+  cohort_df              = cohort_df,
+  risk_fn                = pce_predict,
+  initial_block_size     = 400,
+  block_size             = 100,
+  n_blocks               = 26,
+  threshold_adapt_method = list(type = "quantile", initial_threshold = 0.10, desired_treat_rate = 0.30),
+  model_adapt_method     = list(type = "none"),
+  outcome_fn             = outcome_attend
+)
+
+# 4) Estimate the local treatment effect at the (adaptive) threshold
+fit_out <- estimate_spline(sim_out, family = binomial())
+compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, attendance_prob)
 ```
 
-Python example (reading files from NHANES_DIR)
+---
 
-```python
-import os
-import pyreadstat
+## Citing This Work
 
-nhanes_dir = os.environ.get("NHANES_DIR")
-demo_path = os.path.join(nhanes_dir, "P_DEMO.XPT")
-demo_df, meta = pyreadstat.read_xport(demo_path)
-```
+If you use this repository or build upon its methods, please cite:
 
-If you convert XPT to CSV for local use, keep consistent filenames and update your config to point to the CSV versions.
+**Odeh-Couvertier V., Zayas-Cabán G., Patterson B., Cochran A.**  
+*Designing a quasi-experiment to study the clinical impact of adaptive risk prediction models.*  
+Preprint, 2025.
 
-## Preprocessing and pipeline (example commands)
-- Typical R preprocessing (example - replace with your actual script name and flags):
-  ```
-  Rscript scripts/prep_nhanes.R --input-dir "$NHANES_DIR" --output-dir data_processed
-  ```
-- Typical Python preprocessing (example):
-  ```
-  python scripts/prep_nhanes.py --input-dir "$NHANES_DIR" --output data_processed
-  ```
+---
 
-## Rendering the Quarto site and reproducing simulations
-- Install Quarto: https://quarto.org/docs/get-started/
-- From repository root, render the site or specific pages:
-  ```
-  quarto render analysis/quarto --to html
-  ```
-  or
-  ```
-  quarto render analysis/quarto/simulations.qmd --to html
-  ```
-- Open the generated HTML in `analysis/quarto/_site/` or `docs/`.
+## License
 
-The published site is available at: https://cochran4.github.io/adaptive_rd
-
-## Paper and citation
-This repository documents the simulations and analyses for the manuscript "Designing a quasi-experiment to study the clinical impact of adaptive risk prediction models." Please cite the manuscript and the project site when reusing methods or figures. Add a BibTeX entry or CITATION file if available.
-
-## License — MIT
-This repository is distributed under the MIT License (a copy of the LICENSE file is included in the repo). Summary:
-- You may use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software.
-- You must include the original copyright and license notice in any substantial portions of the software.
-- The software is provided "as is", without warranty; authors are not liable for damages.
-
-## Reproducibility & privacy
-- Pin package versions in `environment.yml` or `requirements.txt`.
-- Store deterministic seeds and experiment configs in `configs/`.
-- Do not commit PHI or other sensitive data. Keep NHANES files outside the repo and reference them via an environment variable or configuration file.
-
-## Contact / maintainer
-Maintainer: cochran4  
-For questions or contributions, open an issue or submit a pull request on GitHub.
-```
+This project is released under the **MIT License**. See `LICENSE` for details.
