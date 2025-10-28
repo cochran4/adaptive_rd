@@ -274,7 +274,7 @@ plot_spline_curves <- function(
   # ----------------------------------------
   p <- p + ggplot2::coord_cartesian(xlim = c(zoom_min, zoom_max)) +
     ggplot2::labs(
-      x = bquote(bold("Risk prediction, " * R[.(n_patients)])),
+      x = bquote(bold("Risk score, " * r[.(n_patients)])),
       y = y_lab
     ) +
     ggplot2::theme(axis.title.x = ggplot2::element_text(face = "bold"))

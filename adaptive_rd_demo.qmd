@@ -307,7 +307,7 @@ fit_out <- estimate_spline(sim_out, family=gaussian())
 # Plot
 plot_spline_curves(
   fit_out, sim_out, pce_predict, cholest_mean, cohort_df,
-  y_lab  = "Change in Cholesterol, mg/dL",
+  y_lab  = "Mean change in Cholesterol, mg/dL",
   labels = c("No Medication", "Medication"),
   save_path = "figures/case2_spline_curves.rds"
 )
@@ -419,7 +419,7 @@ fit_out <- estimate_spline(sim_out, family=gaussian())
 # Plot
 plot_spline_curves(
   fit_out, sim_out, pce_predict, cholest_mean, cohort_df,
-  y_lab  = "Change in Cholesterol, mg/dL",
+  y_lab  = "Mean change in Cholesterol, mg/dL",
   labels = c("No Medication", "Medication"),
   save_path = "figures/case3_spline_curves.rds"
 )
@@ -437,7 +437,7 @@ compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, cholest_mean)
 
 In the fourth scenario, we shift focus from adapting the treatment threshold to updating the prediction model itself. The outcome is a cardiovascular event, simulated as a binary variable indicating whether the patient experiences an ASCVD event during follow-up. Specifically, we consider a setting where the original risk model is miscalibrated—underestimating cardiovascular event risk for high-risk patients and overestimating it for low-risk ones. To address this mismatch, we implement a recalibration strategy that applies an affine transformation to the model’s linear predictor, allowing it to better align predicted and actual risks over time.
 
-The simulated outcome is the occurrence of an ASCVD event, generated using a miscalibrated version of the pooled cohort equations. Specifically, for each patient, we recompute baseline risk and apply an affine transformation to the linear predictor to introduce systematic calibration error. Let ( \bar{R}\_{i,1} ) be the original predicted risk, transformed to the log–log scale as ( \eta*i =* \log(-\log(1 - \bar{R}{i,1})) ). The true event probability is then given by \[ p_i = 1 - \exp\left{ -\exp\left( \alpha\_0 + \alpha\_1 \eta\_i + \tau A_i \right) \right}, \] where ( A_i ) indicates treatment, ( \alpha\_0 ) and ( \alpha\_1 ) control baseline drift and slope, and ( \tau ) represents the treatment effect. Events are drawn as Bernoulli(( p_i )), creating a nonlinear relationship between risk and outcome that challenges the adaptive estimator.
+The simulated outcome is the occurrence of an ASCVD event, generated using a miscalibrated version of the pooled cohort equations. Specifically, for each patient, we recompute baseline risk and apply an affine transformation to the linear predictor to introduce systematic calibration error. Let ( \bar{R}\_{i,1} ) be the original predicted risk, transformed to the log–log scale as ( \eta*i =\* \log(-\log(1 - \bar{R}{i,1})) ). The true event probability is then given by \[ p_i = 1 - \exp\left{ -\exp\left( \alpha\_0 + \alpha\_1 \eta\_i + \tau A_i \right) \right}, \] where ( A_i ) indicates treatment, ( \alpha\_0 ) and ( \alpha\_1 ) control baseline drift and slope, and ( \tau ) represents the treatment effect. Events are drawn as Bernoulli(( p_i )), creating a nonlinear relationship between risk and outcome that challenges the adaptive estimator.
 
 ```{r}
 # --- Outcome: Cardiovascular event -----
