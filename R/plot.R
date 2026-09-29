@@ -863,7 +863,7 @@ save_panel_from_rds <- function(fig_matrix, filename,
   set_font <- function(p) {
     p + ggplot2::theme(text = ggplot2::element_text(family = "Helvetica"))
   }
-  
+
   dims <- dim(fig_matrix)
   n_panels <- prod(dims)
   labels <- LETTERS[1:n_panels]
@@ -881,7 +881,7 @@ save_panel_from_rds <- function(fig_matrix, filename,
   # ---- Wrap with manual tags ----
   panel_plot <- patchwork::wrap_plots(plotlist = plot_list,
                                       ncol = dims[2],
-                                      byrow = TRUE) &
+                                      byrow = TRUE) +
     ggplot2::theme(plot.tag = ggplot2::element_text(face = "bold"))
   
   # Manually assign tags using patchwork's `tag_prefix` + `tag_suffix`

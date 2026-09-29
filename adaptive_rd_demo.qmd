@@ -658,4 +658,19 @@ fig_files <- matrix(c(
 # Build and save the panel as EPS
 save_panel_from_rds(fig_files, filename = "figures/fig_model_adaptation.pdf", width = 9, height = 18)
 
+# Figure for model adaptation (now 2-by-2)
+fig_files <- matrix(c(
+  "figures/case4_risk_transform.rds",   # upper left
+  "figures/case4_risk_trajectory.rds",  # upper right
+  "figures/case4_spline_curves.rds",    # lower left
+  "figures/case5_spline_curves.rds"     # lower right
+), nrow = 2, byrow = TRUE)  # <-- KEY CHANGE: 2 rows, fill by row
+
+# Build and save the panel as PDF
+save_panel_from_rds(
+  fig_files,
+  filename = "figures/fig_model_adaptation_2by2.pdf",
+  width = 16,  # adjust width and height for square aspect
+  height = 10
+)
 ```
