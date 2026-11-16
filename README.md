@@ -1,9 +1,40 @@
 # Adaptive regression discontinuity
 
-Simulation code accompanying *Designing a quasi-experiment to study the clinical
-impact of risk prediction models that adapt after deployment*.
+**View the Adaptive RD Simulation Demo:**
+[cochran4.github.io/adaptive_rd](https://cochran4.github.io/adaptive_rd/)
 
-[View the demonstration](https://cochran4.github.io/adaptive_rd/).
+## Overview
+
+This repository accompanies the study by **Odeh-Couvertier V., Zayas-Cabán G.,
+Patterson B., and Cochran A.**:
+
+*Designing a quasi-experiment to study the clinical impact of risk prediction
+models that adapt after deployment.*
+
+The project develops and demonstrates a **regression discontinuity (RD)**
+framework for healthcare settings where both the **risk prediction model** and
+**decision threshold** can adapt over time. The simulations evaluate local
+assignment effects while thresholds target capacity or estimated benefit, and
+prediction models are recalibrated or revised as patient data accumulate.
+
+A Quarto-generated HTML demonstration explains the scenarios, threshold and
+model updates, estimation, and results.
+
+## Repository structure
+
+- `adaptive_rd_demo.qmd` — Quarto demonstration and narrative.
+- `docs/` — GitHub Pages landing page, rendered demonstration, and assets.
+- `R/` — Data preparation, prediction, adaptation, estimation, and plotting.
+- `run_comparison.R` — Estimator-comparison simulation runner.
+- `run_adaptation.R` — Adaptation-study simulation runner.
+- `results/` — Final saved simulation results, organized by analysis.
+- `figures/` — Publication figures and saved figure objects.
+- `references.bib` — References cited in the demonstration.
+- `data_raw/` *(ignored)* — Local NHANES `.XPT` files, not tracked by Git.
+- `LICENSE` — MIT License.
+- `README.md` — Overview and instructions.
+
+> Raw NHANES data is intentionally excluded. See setup below.
 
 ## Setup
 
