@@ -8,108 +8,63 @@
 #' Adapt a risk threshold based on a desired treatment rate
 #'
 #' Finds the risk threshold c such that a specified proportion
-#' (`desired_treat_rate`) of individuals have risk >= c.
+#' (`target_treat_rate`) of individuals have risk >= c.
 #'
-#' @param data Data frame containing the analytic dataset.
-#' @param rows Optional integer vector of row indices to use. If NULL,
-#'             all rows in `data` are used.
-#' @param risk_fn Function taking (data, coef_adjust) and returning a numeric
-#'                vector of risk estimates in [0, 1].
-#' @param coef_adjust Optional object passed to `risk_fn` (e.g., PCE overrides or
-#'                    LP rescaling controls). Only needed if `risk_fn` uses it.
-#' @param desired_treat_rate Target fraction of individuals to treat
-#'                           (e.g., 0.50 for 50% treated).
+#' @param risks Risk predictions for all patients observed so far.
+#' @param target_treat_rate Target assignment rate for the next block.
 #'
 #' @return Numeric risk threshold value.
 adapt_threshold_quantile <- function(
     risks,
-    desired_treat_rate = 0.50
+    target_treat_rate = 0.50
 ) {
-  
-  # threshold so that desired_treat_rate fraction are >= threshold
+  if (target_treat_rate <= 0) return(Inf)
+  if (target_treat_rate >= 1) return(-Inf)
+
+  # Threshold so that target_treat_rate fraction are >= threshold
   threshold <- stats::quantile(
     risks,
-    probs = 1 - desired_treat_rate,  # higher treat rate => lower threshold
+    probs = 1 - target_treat_rate,  # higher treat rate => lower threshold
     na.rm = TRUE
   )
   as.numeric(threshold)
 }
 
+# Target assignment rate for the next block after update_number updates.
+quantile_target_rate <- function(method, update_number) {
+  method$target_treat_rate *
+    min(update_number / method$blocks_to_target_rate, 1)
+}
+
 # ============================================================
-# Number-needed-to-treat (NNT)-based threshold (pointwise)
+# Benefit-based threshold: local increase/decrease/hold rule
 # ============================================================
-#
-# Chooses the risk threshold c such that the pointwise treatment effect
-# at risk = c yields an NNT closest to `desired_nnt`. Continuous outcomes only.
-# Uses:
-#   - estimate_spline(sim_out, "gaussian")
-#   - conditional_curves(fit_out, x_seq = risk_grid, level)
-#   - pooled SD from sim_out$results$outcome by treat
-#
-# Returns: list with
-#   - threshold : chosen risk threshold
-#   - grid      : data.frame(risk_threshold, effect, d, nnt)
-#
-adapt_threshold_nnt <- function(sim_out,
-                                risks,
-                                desired_nnt,
-                                min_treat_rate = 0,
-                                max_treat_rate = 1, 
-                                shrinkage = .5) {
-  
-  # Previous threshold
-  prev_threshold <- tail(sim_out$results$threshold_used, 1)
-  
-  # Compute target d from desired NNT
-  target_d <- sqrt(2) * qnorm(0.5 * (1 + 1 / desired_nnt))
-  
-  # Minimum risk based on max possible treat rate
-  min_risk <- adapt_threshold_quantile(risks, max_treat_rate)
+# Assumes that assignment benefit increases with risk. Adapt the local
+# target-seeking principle of Ivanova and Kim (2009), Biometrics 65:307-315,
+# DOI: 10.1111/j.1541-0420.2008.01045.x, to the estimated assignment contrast.
+adapt_threshold_benefit <- function(sim_out,
+                                    target_reduction,
+                                    step_size = 0.01,
+                                    confidence_level = 2 * pnorm(1) - 1) {
+  # Use the proposed estimator and its joint interval at the current cutoff.
+  fit_out <- estimate_spline(sim_out, family = gaussian())
+  estimate <- ate_at_threshold(fit_out, sim_out, ci = confidence_level)
+  current_threshold <- estimate$cutoff
 
-  # Maximum risk based on min possible treat rate
-  max_risk <- adapt_threshold_quantile(risks, min_treat_rate)
-  
-  # Possible risk thresholds
-  risk_grid = ((min_risk*1000):(max_risk*1000))/1000
-  
-  #---------------
-  # Get estimates
-  #---------------
-  
-  # Only works for Gaussian
-  family <- gaussian()
+  # The estimator reports assigned minus unassigned LDL change. Reverse the
+  # signs and endpoints to express the interval as an additional LDL reduction.
+  reduction_lower <- -estimate$ci["hi"]
+  reduction_upper <- -estimate$ci["lo"]
 
-  # Fit spline to simulation output
-  fit_out <- estimate_spline(sim_out, family)
-  
-  # curves: long DF with columns risk_last, mean, grp ∈ {Control, Treated}
-  curves <- conditional_curves(fit_out, risk_grid)
-  control <- curves[curves$grp == "Control", ]
-  treated <- curves[curves$grp == "Treated", ]
-  
-  # pointwise effect at each risk_last (assumes identical order)
-  effect <- treated$mean - control$mean
-  
-  # Pooled standard deviations (assumes continuous outcome)
-  df <- sim_out$results
-  y0 <- df$outcome[df$treat == 0]
-  y1 <- df$outcome[df$treat == 1]
-  n0 <- length(y0); n1 <- length(y1)
-  s0 <- sd(y0, na.rm = TRUE); s1 <- sd(y1, na.rm = TRUE)
-  sp <- sqrt(((n0 - 1) * s0^2 + (n1 - 1) * s1^2) / (n0 + n1 - 2))
-  
-  # Cohen's d for each LATE
-  cohen_d <- - effect / sp
+  # Larger benefits require a higher risk threshold under this scenario's
+  # monotonicity assumption. Hold when the interval includes the target.
+  if (reduction_upper < target_reduction) {
+    current_threshold <- current_threshold + step_size
+  } else if (reduction_lower > target_reduction) {
+    current_threshold <- current_threshold - step_size
+  }
 
-  # Pick risk threshold where d is closest to target_d ---
-  opt_idx <- which.min(abs(cohen_d - target_d))
-  
-  # New threshold
-  new_threshold <- risk_grid[opt_idx]
-  
-  # Return weighted average of two thresholds
-  return( shrinkage*prev_threshold + (1-shrinkage)*new_threshold )
-
+  as.numeric(pmin(pmax(current_threshold, 0), 1))
 }
 
 # ============================================================
@@ -118,32 +73,35 @@ adapt_threshold_nnt <- function(sim_out,
 # ============================================================
 
 # Expects:
-# - method$type: "none", "quantile", or "nnt"
+# - method$type: "none", "quantile", or "benefit"
 # - method$initial_threshold (used when type == "none")
-# - method$desired_treat_rate (for "quantile")
-# - method$treatment_effect_fn, method$desired_nnt (for "nnt")
-# - optional: method$min_treat_rate, method$max_treat_rate (for "nnt")
+# - method$target_treat_rate and method$blocks_to_target_rate (for "quantile")
+# - method$initial_threshold, method$target_reduction, method$step_size, and
+#   method$confidence_level (for "benefit")
 
-adapt_threshold <- function(method, risks, sim_out) {
-  
+adapt_threshold <- function(method, risks, sim_out, update_number) {
+
   if (identical(method$type, "none")) {
     return(method$initial_threshold)
   }
-  
+
   if (identical(method$type, "quantile")) {
+    current_target_rate <- quantile_target_rate(method, update_number)
     return(adapt_threshold_quantile(
-      risks              = risks,
-      desired_treat_rate = method$desired_treat_rate
+      risks             = risks,
+      target_treat_rate = current_target_rate
     ))
   }
-  
-  if (identical(method$type, "nnt")) {
-    return(adapt_threshold_nnt(sim_out,
-                               risks,
-                               method$desired_nnt))
+
+  if (identical(method$type, "benefit")) {
+    return(adapt_threshold_benefit(
+      sim_out          = sim_out,
+      target_reduction = method$target_reduction,
+      step_size        = method$step_size,
+      confidence_level = method$confidence_level
+    ))
   }
-  
+
   # If type is unrecognized, just keep current threshold.
   method$initial_threshold
 }
-

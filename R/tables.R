@@ -25,7 +25,11 @@ compare_ate_at_threshold <- function(fit_out, sim_out, cohort_df, risk_fn, mean_
   est <- ate_at_threshold(fit_out, sim_out)
   
   # Actual local ATE (based on DGM)
-  tru <- ate_at_threshold_truth(sim_out, cohort_df, mean_fn)
+  original_risk <- risk_fn(cohort_df)
+  truth_mean <- function(cohort_df, idx, risk_baseline, treat) {
+    mean_fn(cohort_df, idx, original_risk[idx], treat)
+  }
+  tru <- ate_at_threshold_truth(sim_out, cohort_df, truth_mean)
   
   # Recover values
   est_ate <- est$ate

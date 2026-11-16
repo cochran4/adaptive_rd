@@ -1,142 +1,190 @@
 # R/simulate.R
 # Streamed simulation over iid bootstrap samples from a cohort,
-# with optional threshold adaptation (quantile- or NNT-based).
+# with optional threshold adaptation (quantile- or benefit-based).
 
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
 
 # iid sample of row indices (with replacement)
-sample_idx <- function(n_rows, size) sample.int(n_rows, size = size, replace = TRUE)
+sample_idx <- function(n_rows, size)
+  sample.int(n_rows, size = size, replace = TRUE)
 
 # -------------------------------------------------------------------
 # Main API
 # -------------------------------------------------------------------
 
 # simulate_design()
-# - Draws an initial warm-up block of individuals, followed by n_blocks
-#   blocks of size block_size, sampled iid (with replacement) from cohort_df.
-# - Assigns treatment if predicted risk exceeds a threshold, which can adapt
+# - Draws n_blocks of size block_size, sampled iid (with replacement) from
+#   cohort_df.
+# - Assigns treatment if predicted risk meets or exceeds a threshold, which can
+# adapt
 #   over time depending on threshold_adapt_method.
-# - Optionally updates the outcome model itself according to model_adapt_method.
+# - Optionally updates the prediction model according to model_adapt_method.
 #
 # Arguments:
 #   cohort_df            : data frame, the sampling frame for iid draws
-#   risk_fn              : function(df_block, coef_adjust?) -> vector of risks in [0,1]
-#   initial_block_size   : number of individuals in the initial warm-up block
-#   block_size           : number of individuals per subsequent block
-#   n_blocks             : number of post–warm-up blocks
+# risk_fn              : function(df_block, coef_adjust?) -> vector of risks in
+# [0,1]
+#   block_size           : number of individuals per block
+#   n_blocks             : total number of blocks
 #   threshold_adapt_method : list describing threshold adaptation, with fields:
-#                            $type = "none", "quantile", or "nnt"
-#                            $initial_threshold = starting risk threshold in [0,1]
-#                            $adapt_every = update frequency (in blocks)
-#                            $desired_treat_rate = target treat rate if type=="quantile"
-#                            $desired_nnt = target NNT if type=="nnt"
-#                            $min_threshold, $max_threshold, $grid_points = search grid
+#                            $type = "none", "quantile", or "benefit"
+# $initial_threshold = starting threshold for the first block
+# $target_treat_rate = final target rate if type=="quantile"
+# $blocks_to_target_rate = ramp length if type=="quantile"
+# $target_reduction = target outcome reduction if type=="benefit"
 #   model_adapt_method   : list describing model adaptation, with fields:
-#                            $type = "none", "refit", or other strategies
+#                            $type = "none", "recalibrate", or "revise"
+# $coef_initial = optional starting prediction coefficients
 #                            plus any method-specific options
-#   outcome_fn           : function(cohort_df, idx, risk0, treat) -> outcome probability
+# outcome_fn           : function(cohort_df, idx, risk0, treat) -> simulated
+# outcome
 #
 # Returns:
 #   list(
-#     data = tibble(person_id, block, risk, threshold_used, treat, outcome),
-#     threshold_log = tibble(block, threshold, adapt_reason)
+# results = tibble(person_id, block, risk, threshold_used, treat, outcome, ...),
+#     risks_mat = cohort risks under each deployed model,
+#     model_updates = fitted model parameters after each update
 #   )
 simulate_design <- function(
-    cohort_df,               # Base cohort data; rows are sampled with replacement
-    risk_fn,                 # Function(df_block) -> vector of predicted risks in [0,1]
-    initial_block_size,      # Sample size for the initial warm-up block
-    block_size,              # Sample size for each subsequent block
-    n_blocks,                # Number of post–warm-up blocks
-    threshold_adapt_method,  # List with $type, $initial_threshold, etc.
+    # Base cohort data; rows are sampled with replacement
+    cohort_df,
+    # Function(data, coef_adjust) -> predicted risks in [0,1]
+    risk_fn,
+    block_size,              # Sample size for each block
+    n_blocks,                # Total number of blocks
+    threshold_adapt_method,   # List with $type and threshold settings
     model_adapt_method,      # List with $type and optional adaptation logic
-    outcome_fn               # Function(cohort_df, idx, risk0, treat) -> outcome 
+    outcome_fn               # Function(cohort_df, idx, risk0, treat) -> outcome
 ) {
   N <- nrow(cohort_df)
-  
-  # Start with the user-specified initial threshold
+
+  # Start with the threshold specified by the scenario.
   current_threshold <- threshold_adapt_method$initial_threshold
-  
-  # Storage for simulation output (1 warm-up block + n_blocks)
-  results <- vector("list", length = 1L + n_blocks)
-  
-  # Index history across blocks (used for adaptation)
+
+  # Record the planned rate for quantile rules; other rules have no rate target.
+  current_target_treat_rate <- if (
+    identical(threshold_adapt_method$type, "quantile")
+  ) {
+    0
+  } else {
+    NA_real_
+  }
+
+  # Store one result per block and at most one model update between blocks.
+  results <- vector("list", length = n_blocks)
+  model_updates <- vector("list", length = max(n_blocks - 1L, 0L))
+
+  # Retain all sampled cohort indices, including repeated draws.
   idx_hist <- integer(0)
-  
-  # Matrix to store risk values for *all* cohort individuals over time
-  risks_mat <- matrix(NA_real_, nrow = N, ncol = n_blocks + 1L)
-  colnames(risks_mat) <- paste0("block_", 0:n_blocks)
-  
-  # Precompute risk scores for block 0
-  risks_mat[, 1L] <- risk_fn(cohort_df, coef_adjust = NULL)
-  
-  # Iterate over each block (block 1 is warm-up)
-  for (block in 1:(1 + n_blocks)) {
-    
-    # Set sample size for this block
-    current_block_size <- if (block == 1L) initial_block_size else block_size
-    
+
+  # Rows are source-cohort individuals; columns are deployed block models.
+  risks_mat <- matrix(NA_real_, nrow = N, ncol = n_blocks)
+  colnames(risks_mat) <- paste0("block_", seq_len(n_blocks))
+
+  # Preserve risk under the original model for the outcome-generating mechanism.
+  risk_baseline <- risk_fn(cohort_df, coef_adjust = NULL)
+
+  # Precompute assignment risk for block 1. Model-revision scenarios can supply
+  # their revised starting model before any outcomes have accumulated.
+  initial_coef_adjust <- model_adapt_method$coef_initial
+  risks_mat[, 1L] <- if (is.null(initial_coef_adjust)) {
+    risk_baseline
+  } else {
+    risk_fn(cohort_df, coef_adjust = initial_coef_adjust)
+  }
+
+  # Process n_blocks equal-sized blocks; there is no separate warm-up block.
+  for (block in seq_len(n_blocks)) {
+
     # Sample a set of individual indices with replacement
-    idx <- sample_idx(N, current_block_size)
-    
+    idx <- sample_idx(N, block_size)
+
     # Pull risk values for the sampled individuals at the current block
     risk <- risks_mat[idx, block]
-    
-    # Apply treatment rule: treat if above the current threshold
+
+    # Assign the intervention when risk meets or exceeds the current threshold.
     treat <- as.integer(risk >= current_threshold)
-    
-    # Draw outcomes using the user-specified outcome function
-    # Uses block-0 risk for consistency across treatment decisions
-    outcome <- outcome_fn(cohort_df, idx, risks_mat[idx, 1L], treat)
-    
+
+    # Draw outcomes using risk under the original model so that changing the
+    # deployed prediction model does not change the outcome-generating
+    # mechanism.
+    outcome <- outcome_fn(cohort_df, idx, risk_baseline[idx], treat)
+
     # Store results from this block
     results[[block]] <- tibble::tibble(
-      person_id      = idx,
-      block          = block,
-      risk           = risk,
-      threshold_used = current_threshold,
-      treat          = treat,
-      outcome        = outcome
+      person_id        = idx,
+      block            = block,
+      risk             = risk,
+      threshold_used   = current_threshold,
+      target_treat_rate = current_target_treat_rate,
+      treat            = treat,
+      outcome          = outcome
     )
-    
+
     # Accumulate index history across blocks (used for adaptive updates)
     idx_hist <- c(idx_hist, idx)
 
-    # ----------- Adapt Threshold for Next Block -----------
-    if (block < 1 + n_blocks) {
-      
-      # Update model using adaptation method
+    # Update the model and threshold for the next block; skip after the last
+    # block.
+    if (block < n_blocks) {
+
+      # Fit the next model using only outcomes observed through this block.
       model_adapt_method$coef_adjusted <- adapt_model(
         df      = cohort_df,
         method  = model_adapt_method,
-        sim_out = list(
+        sim_out       = list(
           results   = dplyr::bind_rows(results[1:block]),
-          risks_mat = risks_mat[ , 1:block, drop = FALSE]
+          risks_mat = risks_mat[, 1:block, drop = FALSE]
         )
       )
-      
-      # Update threshold using adaptation method
+
+      # Save any fitted parameters attached by the model updater.
+      recalibration <- attr(model_adapt_method$coef_adjusted, "recalibration")
+      if (!is.null(recalibration)) {
+        model_updates[[block]] <- tibble::as_tibble(recalibration)
+        model_updates[[block]]$after_block <- block
+      }
+
+      revision <- attr(model_adapt_method$coef_adjusted, "revision")
+      if (!is.null(revision)) {
+        model_updates[[block]] <- tibble::as_tibble(revision)
+        model_updates[[block]]$after_block <- block
+      }
+
+      # Use observed patients' risks under the just-completed block's model.
+      # The newly fitted model supplies predictions only for the next block.
       risks_cumulative <- risks_mat[idx_hist, block]
       current_threshold <- adapt_threshold(
-        method  = threshold_adapt_method,
-        risks   = risks_cumulative,
-        sim_out = list(
+        method        = threshold_adapt_method,
+        risks         = risks_cumulative,
+        update_number = block,
+        sim_out       = list(
           results   = dplyr::bind_rows(results[1:block]),
-          risks_mat = risks_mat[ , 1:block, drop = FALSE]
+          risks_mat = risks_mat[, 1:block, drop = FALSE]
         )
       )
-      
-      # Pre-compute risk for next block
-      risks_mat[, block + 1L] <- risk_fn(cohort_df, coef_adjust = model_adapt_method$coef_adjusted)
-      
+
+      # Record the ramped assignment target for the next block.
+      if (identical(threshold_adapt_method$type, "quantile")) {
+        current_target_treat_rate <- quantile_target_rate(
+          threshold_adapt_method, block
+        )
+      }
+
+      # Evaluate the next model for the full source cohort.
+      risks_mat[, block + 1L] <- risk_fn(
+        cohort_df, coef_adjust = model_adapt_method$coef_adjusted
+      )
+
     }
   }
-  
-  # Return full results and risk matrix
+
+  # Combine block results and update logs; retain the full risk history.
   list(
-    results   = dplyr::bind_rows(results),
-    risks_mat = risks_mat
+    results       = dplyr::bind_rows(results),
+    risks_mat     = risks_mat,
+    model_updates = dplyr::bind_rows(model_updates)
   )
 }
-  

@@ -3,9 +3,20 @@
 .RData
 .Ruserdata
 .Rproj.user/
+.DS_Store
+/Rplots.pdf
 
-# Raw data folders
-data_raw/
+# Public raw data downloaded locally
+/data_raw/
 
-# Old folder
-QEDLrnSys-main
+# Local recovery copies
+/archive/
+
+# Regenerable Quarto and panel outputs
+/.quarto/
+/adaptive_rd_demo.html
+/adaptive_rd_demo_files/
+/*.rmarkdown
+/figures/panels/
+
+**/*.quarto_ipynb

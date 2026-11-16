@@ -1,0 +1,5 @@
+project:
+  type: default
+  output-dir: docs
+  render:
+    - adaptive_rd_demo.qmd

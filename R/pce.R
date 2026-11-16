@@ -26,7 +26,7 @@
 
 # --------------------------------------------------------------------
 # Select the active coefficient bundle:
-#   - use `coef_adjust$coefs` if provided,
+#   - use `coef_adjust` if provided,
 #   - otherwise fall back to the default `coefs` (usually `pce_coefs`).
 # --------------------------------------------------------------------
 .get_active_coefs <- function(default_coefs, coef_adjust) {

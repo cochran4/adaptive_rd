@@ -1,6 +1,7 @@
 ---
 title: "Adaptive RD demonstration"
 author: "Amy Cochran"
+bibliography: references.bib
 format:
   html:
     css: adaptive_rd_demo.css
@@ -18,25 +19,9 @@ execute:
 
 This document demonstrates how to **simulate an adaptive regression discontinuity (RD) design** and use the resulting data to evaluate the performance of **adaptive RD estimators**.
 
-In an adaptive RD design, treatment assignment depends on whether a patient’s predicted risk exceeds a decision threshold. Unlike a traditional RD, both the prediction model and the threshold can evolve over time. For example, the threshold may adapt to achieve a target treatment rate or a clinical performance metric, such as the number-needed-to-treat (NNT). The prediction model may also be recalibrated or revised using accumulated patient data.
+In an adaptive RD design, treatment assignment depends on whether a patient’s predicted risk meets or exceeds a decision threshold. Unlike a traditional RD, both the prediction model and the threshold can evolve over time. For example, the threshold may adapt to achieve a target assignment rate or a target assignment benefit. The prediction model may also be recalibrated or revised using accumulated patient data.
 
-To simulate such a design, we first define its core components — the study population, the prediction model, the adaptation rules for the threshold or model, and the outcome mechanism. The table below provides a concrete example using **cardiovascular risk prediction in the general population**.
-
-| **Design Component** | **Cardiovascular Risk Example** |
-|------------------------------------|------------------------------------|
-| **Inclusion criteria** | Adults aged 40–79 in the general population |
-| **Exclusion criteria** | History of cardiovascular disease or contraindication to preventive therapy |
-| **Model** | Risk model predicting 10-year ASCVD risk (e.g., pooled cohort equations \[PCE\]) |
-| **Intervention** | Referral to preventive care program (e.g., cardiovascular health clinic, medication review, and lifestyle counseling) |
-| **Comparator** | Continue routine care without referral |
-| **Trigger event** | Annual primary care visit |
-| **Allocation** | Automatic referral if predicted risk exceeds the current threshold |
-| **Threshold adaptation** | Threshold chosen to target specific referral rate or desired NNT |
-| **Model adaptation** | Annual model recalibration or revision using most recent data |
-| **Follow-up period** | Six months after index visit |
-| **Outcomes** | Change in systolic blood pressure, referral completion, or occurrence of cardiovascular event |
-
-------------------------------------------------------------------------
+We illustrate four scenarios using a cardiovascular-risk program. The first two adapt the assignment threshold, with attendance and LDL cholesterol change as outcomes. The remaining two adapt both the threshold and prediction model, with cardiovascular events as the outcome. Each simulation processes 3,000 patients in blocks of 100.
 
 ## Load packages
 
@@ -44,7 +29,8 @@ We load the core functions and dependencies needed for data processing, risk pre
 
 ```{r}
 # Core package imports along with core functionality
-source("R/imports.R")           
+source("R/imports.R")
+dir.create("figures/panels", recursive = TRUE, showWarnings = FALSE)
 
 # Setting seed for reproducibility
 set.seed(1234)
@@ -52,7 +38,7 @@ set.seed(1234)
 
 ## Build template dataset
 
-To generate realistic patient covariates, we sample with replacement from a cohort constructed using NHANES 2017–2018 data. The helper function `build_cohort()` reads and merges raw XPT files, filters adults aged 40–79, derives the variables required for PCE risk prediction (age, sex, race, blood pressure, cholesterol, smoking, diabetes, treatment status), imputes missing values, and standardizes variable names. Below, we (1) load the raw data, (2) build `cohort_df`, and (3) display a baseline summary before simulation.
+To generate realistic patient covariates, we sample with replacement from a cohort constructed using NHANES 2017–March 2020 pre-pandemic data [@stierman2021national]. The helper function `build_cohort()` reads and merges raw XPT files, filters adults aged 40–79, derives the variables required for Pooled Cohort Equations (PCE) risk prediction [@goff20142013] (age, sex, race, blood pressure, cholesterol, smoking, diabetes, treatment status), imputes missing values, and standardizes variable names. Below, we (1) load the raw data, (2) build `cohort_df`, and (3) display a baseline summary before simulation.
 
 ```{r}
 data_dir     <- 'data_raw'
@@ -67,483 +53,217 @@ knitr::kable(cohort_bundle$summary$categorical, caption = "Categorical predictor
 
 ## Simulation
 
-### Increasing uptake of a resource-limited prevention program
+### Increasing attendance at NHS Health Checks through targeted telephone invitations
 
-In this first scenario, we simulate a cardiovascular prevention program that refers high-risk individuals to preventive care. Because program capacity is limited, only a fixed proportion of patients can be referred at any time. Rather than using a fixed clinical threshold (e.g., 10% ASCVD risk), we adopt a quantile-based rule: after an initial warm-up using the clinical cutoff, the threshold is updated so that approximately 30% of patients in each block are referred, based on observed risk scores. This approach emulates a health system striving to manage limited resources while targeting care to the highest-risk patients.
-
-```{r}
-# Quantile-based adaptation: set threshold so that a fraction is treated
-threshold_method_quantile <- list(
-     type               = "quantile",
-     initial_threshold  = 0.10, # initial_threshold,
-     desired_treat_rate = 0.30  # 30% referral
-  )
-
-```
-
-The risk prediction model is intentionally kept fixed in this scenario. This isolates the impact of threshold adaptation alone, allowing us to observe how referral decisions change under resource constraints without introducing changes in model calibration or discrimination.
+In this first scenario, the health system assigns telephone invitations to patients at highest predicted cardiovascular risk, with standard letters as the comparator. Because staffing is limited, the target assignment rate increases from zero to 30% over six block updates. Each block contains 100 patients, and nobody is assigned a telephone invitation in the first block. After each block, the threshold is updated using the accumulated risk scores and then held fixed for the next block. Once the target is reached, the threshold continues to be updated to assign approximately 30% of patients.
 
 ```{r}
-
-# No adaptation (fixed model)
-model_method_none <- list(type = "none")
-
+threshold_method_quantile
 ```
 
-The outcome of interest in this scenario is whether a referred patient follows through and attends at least one visit in the prevention program. In practice, attendance reflects two forces: baseline risk and the incremental nudge from referral. We assume (i) patients with higher predicted risk are somewhat more likely to attend even without referral, but (ii) the *incremental* effect of referral exhibits diminishing returns—largest for mid‑risk patients and smaller for the very low‑ and very high‑risk. This captures the idea that low‑risk patients feel little urgency, while the sickest either face barriers or would attend regardless, so referral changes behavior least at the extremes.
-
-The multiplicative term ((\bar{R}*{j,1}+1/2)(1-*\bar{R}{j,1})) (scaled in code) peaks around the middle of the risk range and tapers to zero near 0 and 1, enforcing these diminishing returns. Formally, $$
-\mathbb{P}(Y_j = 1 \mid \bar{R}_{j,1}, A_j) = \alpha_0 + \alpha_1 \cdot \bar{R}_{j,1} + A_i \cdot \beta \cdot \left( \bar{R}_{j,1} +  1/2 \right)(1 - \bar{R}_{j,1}),
-$$ where $Y_j$ is the outcome, $A_j$ is the intervention (referral) assignment, and $\bar{R}_{j,1}$ is the risk predicted from the original model.
+The risk prediction model is intentionally kept fixed in this scenario. This isolates the impact of threshold adaptation alone, allowing us to observe how invitation assignments change under resource constraints without introducing changes in model calibration or discrimination.
 
 ```{r}
-# --- Outcome: Prevention Program Attendance ---
-
-# Parameters
-attend_params <- list(
-  treatment_effect_intercept = 0.25,
-  reference_intercept        = 0.00,
-  reference_slope            = 0.10
-)
-
-# ---- Attendance probability ----
-attendance_prob <- function(cohort_df, idx, risk_baseline, treat, params = attend_params) {
-  
-  # Probability formula
-  p <- params$reference_intercept +
-    params$reference_slope * risk_baseline +
-    treat * params$treatment_effect_intercept*(risk_baseline+1/2)*(1-risk_baseline)*16/9
-  
-}
-
-outcome_attend <- function(cohort_df, idx, risk_baseline, treat, params = attend_params) {
-  p <- attendance_prob(cohort_df, idx, risk_baseline, treat, params)
-  stats::rbinom(n = length(idx), size = 1, prob = p)
-}
-
+model_method_none
 ```
 
-We now bring the pieces together to simulate how the program operates over time. The `simulate_design()` function manages the full sequence of decision-making: it computes risk using `pce_predict()`, applies the adaptive threshold to determine referral, and then generates outcomes using `outcome_attend()`. Each block of patients is processed chronologically, allowing the threshold to update based on accumulated experience. Because the prediction model is held fixed, any change in referral behavior arises solely from the adaptive threshold.
+The outcome is whether a patient attends a prevention-program visit. We compare assignment to a telephone invitation with a standard letter, using a logistic approximation to the adjusted attendance curves in @gidlow2019uptake [Figure 2a]. Formally,
+$$\mathbb{P}(Y_k=1\mid R_{k,\mathrm{orig}},A_k)
+=\operatorname{logit}^{-1}(-0.58-3R_{k,\mathrm{orig}}+0.78A_k),$$
+where $A_k=1$ denotes a telephone invitation, $A_k=0$ a standard letter, and $R_{k,\mathrm{orig}}$ is risk from the original prediction model. These coefficients approximate the published figure; they are not reported fitted coefficients. At 10% risk, attendance is approximately 29% under a standard letter and 48% under a telephone invitation. Both probabilities decline with risk, and their difference also decreases over the risk range from zero to one. The constant assignment coefficient on the log-odds scale therefore produces heterogeneous effects on the probability scale. Gidlow used QRISK2; applying this relationship to PCE risks and extending it beyond the plotted 35% risk are simulation assumptions.
+
+```{r}
+# Shared definitions from R/scenario_functions.R
+attend_params
+attendance_prob
+outcome_attend
+```
+
+We now bring the pieces together to simulate how the program operates over time. The `simulate_design()` function manages the full sequence of decision-making: it computes risk using `pce_predict()`, applies the adaptive threshold to assign a telephone invitation or standard letter, and then generates outcomes using `outcome_attend()`. Each block of patients is processed chronologically, allowing the threshold to update based on accumulated experience. Because the prediction model is held fixed, changes in which patients qualify for telephone invitations arise from the adaptive threshold.
 
 ```{r}
 #--- run the simulation ----
 sim_out <- simulate_design(
   cohort_df              = cohort_df,
   risk_fn                = pce_predict,
-  initial_block_size     = 400,   # warm-up
-  block_size             = 100,   # subsequent blocks
-  n_blocks               = 26,    # total post–warm-up blocks
+  block_size             = 100,
+  n_blocks               = 30,
   threshold_adapt_method = threshold_method_quantile,
   model_adapt_method     = model_method_none,
   outcome_fn             = outcome_attend
 )
 ```
 
-The threshold trajectory shows how the system adapts under capacity constraints. After early fluctuations, the threshold stabilizes, indicating the referral rate has aligned with the target proportion.
+The threshold trajectory shows how the system adapts under capacity constraints. The threshold falls during startup and then continues to adjust as more patients are observed, while the target assignment rate remains at 30%.
 
 ```{r}
-plot_threshold_trajectory(sim_out, save_path = "figures/case1_threshold_trajectory.rds")
+plot_threshold_trajectory(sim_out, save_path = "figures/panels/case1_threshold_trajectory.rds")
 ```
 
-To assess how adaptation shaped allocation and behavior, we summarize referral rates and attendance outcomes across blocks.
 
-```{r}
-# results tibble per block
-res <- sim_out$results
+To estimate assignment effects across risk levels, we use each patient's risk under every model version, measured relative to its corresponding threshold. These profiles approximate the resequenced risks defined in the paper. The approximation applies the observed model and threshold histories to every patient, treating each patient's influence on later updates as negligible.
 
-# quick summaries
-treat_by_block <- res |>
-  dplyr::group_by(block) |>
-  dplyr::summarise(
-    n        = dplyr::n(),
-    treated = round(100 * mean(treat), 1),
-    outcome = round(100 * mean(outcome), 1),
-    threshold = dplyr::first(round(threshold_used*1000)/1000)
-  )
+We summarize these histories using the underlying risk probabilities, before subtracting thresholds. The threshold history is shared across patients, so subtracting it only shifts each column by a constant. We transform probabilities to the complementary log-log scale, regress each earlier transformed risk on the final transformed risk with an intercept, and apply PCA to the centered, unscaled residuals. We retain the smallest number of PCs that, together with the final transformed risk, explain at least 90% of the combined variance. With a fixed model, the history adds no PCs.
 
-knitr::kable(treat_by_block, caption = "Block-level treatment and outcome rates with threshold used")
-
-```
-
-To visualize how treatment effects evolve across the risk spectrum, we fit a spline-based model using counterfactual risk representations. We first reduce the counterfactual risk space via PCA, retaining key variation in risk, and then estimate smooth outcome curves separately for treated and untreated patients. This step displays the fitted conditional mean functions for treated and untreated patients. It is the first stage of the adaptive RD estimator, from which we later extract the treatment effect at the threshold.
+We fit one outcome model with separate natural cubic splines in final risk for the two assignment groups and shared linear PC terms. At each target risk, we average predicted assignment contrasts using Gaussian kernel weights with bandwidth 0.02, retaining patients' observed risks and PCs while changing assignment for prediction. The figures use absolute risk on the horizontal axis. Evaluating at the final threshold corresponds to $s=0$ in the paper's threshold-relative notation.
 
 ```{r}
 # Estimate treatment effect using splines
 fit_out <- estimate_spline(sim_out, family=binomial())
 
 # Plot
-plot_spline_curves(fit_out, sim_out, pce_predict, attendance_prob, cohort_df, save_path = "figures/case1_spline_curves.rds")
+plot_spline_curves(fit_out, sim_out, pce_predict, attendance_prob, cohort_df, save_path = "figures/panels/case1_spline_curves.rds")
 
 ```
 
-We now evaluate the estimated treatment effect at the adaptive threshold and compare it to the true effect from the data-generating process.
+We now evaluate the estimated assignment effect at the final threshold and compare it to the true effect from the data-generating process.
 
 ```{r}
 compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, attendance_prob)
 
 ```
 
-```{r}
-fit_out <- ate_naive(sim_out, family=binomial())
-```
+### Targeting bempedoic acid by estimated LDL reduction
 
-This estimate reflects performance at the end of the simulation, after all patients have been processed. To evaluate how early data supports estimation, we also compute effects at earlier points in time, such as after 1,000 and 2,000 patients.
+In the second scenario, we considered a health system that uses accumulating evidence about assignment benefit to determine eligibility for a lipid-lowering medication. The outcome was change in LDL cholesterol, giving us a continuous intermediate outcome that could be measured before enough cardiovascular events had occurred.
 
-```{r}
+We used natural cubic splines for the mean LDL change in each assignment arm. At illustrative baseline risks of 0%, 15%, and 30%, we paired baseline LDL values of 80, 120, and 160 mg/dL with the adjusted 12-week percentage changes reported for the corresponding LDL strata in the pooled CLEAR Harmony and CLEAR Wisdom trials. The source is Figure 16 of the EMA assessment report [@ema2020nustendi, p. 98]. The mapping from LDL strata to cardiovascular risk is a simulation assumption, not a relationship estimated in those trials.
 
-# n = 1000
-sim_out_1000 <- within(sim_out, results <- results[1:1000, ])
-fit_out_1000 <- estimate_spline(sim_out_1000, family = binomial())
-plot_spline_curves(fit_out_1000, sim_out_1000, pce_predict, attendance_prob, cohort_df, save_path = "figures/case1_spline_curves_1000.rds")
+| Original risk | Baseline LDL (mg/dL) | Control change (%) | Medication change (%) |
+|---|---|---|---|
+| 0% | 80 | 6.137 | -12.486 |
+| 15% | 120 | -0.803 | -18.435 |
+| 30% | 160 | -5.766 | -25.219 |
 
-# n = 2000
-sim_out_2000 <- within(sim_out, results <- results[1:2000, ])
-fit_out_2000 <- estimate_spline(sim_out_2000, family = binomial())
-plot_spline_curves(fit_out_2000, sim_out_2000, pce_predict, attendance_prob, cohort_df, 
-save_path = "figures/case1_spline_curves_2000.rds")
-
-```
-
-We now extract the local ATE at earlier time points to assess whether the threshold effect can be estimated reliably before the full sample is observed.
+For each arm, we multiplied baseline LDL by its percentage change to obtain the mean change in mg/dL. The natural splines interpolate these three means, with an interior knot at 15% risk and boundaries at 0% and 30%; they extend linearly beyond the boundaries. We generated outcomes as $Y_k=(1-A_k)m_0(R_{k,\mathrm{orig}})+A_km_1(R_{k,\mathrm{orig}})+\eta_k$, where $R_{k,\mathrm{orig}}$ is original PCE risk, $m_a$ is the corresponding spline, and $\eta_k\overset{\mathrm{iid}}{\sim}N(0,25^2)$. We chose the residual SD of 25 mg/dL to approximate the 22.6–26.7 mg/dL SDs of LDL change reported at entry to the CLEAR Harmony extension, measured from the original trial baseline [@ema2020nustendi, Table 23, p. 97]. These functions are defined once in `R/scenario_functions.R` and are shared by this demonstration and the estimator comparison.
 
 ```{r}
-compare_ate_at_threshold(fit_out_1000, sim_out_1000, cohort_df, pce_predict, attendance_prob)
-
-compare_ate_at_threshold(fit_out_2000, sim_out_2000, cohort_df, pce_predict, attendance_prob)
+cholest_params
+cholest_mean
+outcome_cholest
 ```
 
-### Prioritizing patients for a new lipid-lowering medication
+The health system updates eligibility as evidence accumulates about how much assignment lowers LDL cholesterol. If the threshold is too low, patients with little expected benefit may be assigned medication. If it is too high, patients who would benefit may be missed. We target an additional LDL reduction of 30 mg/dL, approximating the 30.2 mg/dL reduction relative to placebo at six months reported in the CLEAR Outcomes primary-prevention analysis [@nissen2023primaryprevention, Table 2]. Under the outcome model above, this target is reached at a predicted risk of approximately 0.285.
 
-In this second scenario, we move from a binary outcome (program attendance) to a continuous clinical outcome: the change in LDL cholesterol after starting a lipid-lowering medication. The adaptive threshold procedure is unchanged, but the underlying clinical question now differs. Instead of rationing limited program slots, we are prioritizing patients for a new therapy whose benefit increases with baseline risk.
+```{r}
+target_ldl_reduction <- 30
 
-Cholesterol-lowering medications, such as statins and newer agents like PCSK9 inhibitors, lower LDL cholesterol by 30–60%, with larger absolute reductions for patients who start with higher cholesterol. Our simulation mimics this: untreated patients may experience some background drift, while treated patients receive a reduction in LDL that grows with their baseline risk. This setup allows us to examine adaptive RD in a context where treatment effects are continuous and heterogeneous, contrasting with the earlier scenario's binary outcome and resource constraint.
+plot_ldl_reduction_by_risk(
+  target_reduction = target_ldl_reduction,
+  save_path = "figures/panels/case2_ldl_reduction_by_risk.rds"
+)
+```
 
-Formally, the data-generating process models the expected change in LDL cholesterol as a function of baseline risk and treatment assignment, with the treatment effect increasing for higher-risk patients:
+We started at a 10% risk threshold, motivated by the U.S. Preventive Services Task Force recommendation for statin initiation in adults aged 40–75 with cardiovascular risk factors and a 10-year risk of at least 10% [@uspstf2022statin]. This was an illustrative starting value for the simulated medication program. We assumed that the additional LDL reduction from assignment increases with predicted risk. After each block of 100 patients, we used our proposed estimator to estimate this benefit at the current threshold. If the estimate plus one standard error was below 30 mg/dL, we raised the threshold by one percentage point; if the estimate minus one standard error exceeded 30 mg/dL, we lowered it by one percentage point. Otherwise, we retained the threshold. Thresholds were restricted to the interval from zero to one.
+
+This rule adapts the local increase/decrease/hold approach of @ivanova2009dose, which compares a standardized response estimate at the current dose with a target. Here we applied that principle to an estimated assignment benefit rather than an observed mean response. The one-percentage-point step and one-standard-error boundary were choices for this simulation. These bounds guide updating rather than provide simultaneous or sequential confidence coverage.
+
+```{r}
+threshold_method_benefit <- list(
+  type              = "benefit",
+  initial_threshold = 0.10,
+  target_reduction  = target_ldl_reduction,
+  step_size         = 0.01,
+  confidence_level  = 2 * pnorm(1) - 1
+)
+```
+
+We rerun the simulation using this benefit-based threshold rule.
+
+```{r}
+sim_out <- simulate_design(
+  cohort_df              = cohort_df,
+  risk_fn                = pce_predict,
+  block_size             = 100,
+  n_blocks               = 30,
+  threshold_adapt_method = threshold_method_benefit,
+  model_adapt_method     = model_method_none,
+  outcome_fn             = outcome_cholest
+)
+```
+
+We plot how the estimated eligibility threshold changes as outcomes accumulate.
+
+```{r}
+plot_threshold_trajectory(sim_out, save_path = "figures/panels/case2_threshold_trajectory.rds")
+```
+
+
+We then estimate the average potential outcomes under each assignment condition across the risk spectrum.
+
+```{r}
+fit_out <- estimate_spline(sim_out, family = gaussian())
+
+plot_spline_curves(
+  fit_out, sim_out, pce_predict, cholest_mean, cohort_df,
+  y_lab = "Mean change in LDL cholesterol\n(mg/dL)",
+  labels = c("No medication", "Medication"),
+  save_path = "figures/panels/case2_spline_curves.rds"
+)
+```
+
+Finally, we compare the estimated and true local ATE at the final adaptive threshold.
+
+```{r}
+compare_ate_at_threshold(
+  fit_out, sim_out, cohort_df, pce_predict, cholest_mean
+)
+```
+
+### Recalibrating predictions for a shorter follow-up period
+
+In the third and fourth scenarios, the outcome was a cardiovascular event observed over 54 months. We chose this horizon to match the follow-up range displayed in Figure 2 of the CLEAR Outcomes primary-prevention analysis [@nissen2023primaryprevention]. We converted the 10-year risk predicted by PCE to this shorter horizon by assuming a constant baseline hazard. Assignment multiplied the hazard by 0.64, the reported hazard ratio for cardiovascular death, nonfatal myocardial infarction, or nonfatal stroke [@nissen2023primaryprevention, Table 3 and Figure 2B]. We generated the event probability according to
 
 $$
-\mathbb{E}[Y_i \mid A_i=a, X_i=x]
-= \gamma_0 + \gamma_1\big(\text{Chol}_i-130\big)
-+ a\Big(\delta_0 + \delta_1\big(\text{Chol}_i-130\big)\Big),
-$$ where $\gamma_0,\gamma_1$ represent background drift without therapy, and $\delta_0, \delta_1$ capture the medication effect that increases with baseline cholesterol. This is implemented in R as follows:
+\mathbb{P}(Y_k=1\mid R_{k,\mathrm{orig}},A_k)
+=1-\left(1-R_{k,\mathrm{orig}}\right)^{(54/120)\,0.64^{A_k}}.
+$$
+
+Here, $R_{k,\mathrm{orig}}$ is the original predicted 10-year risk and $A_k$ is assignment. The constant-hazard conversion was a simulation assumption. Because PCE predicts 10-year risks while events were observed over 54 months, the original predictions required recalibration to the simulated setting.
 
 ```{r}
-# --- Outcome: Follow-up total cholesterol level-----
-
-# Parameters
-cholest_params <- list(
-  treatment_effect_intercept =   0.00,  # shift for treated
-  treatment_effect_slope     = -10.00,  # effect scales with risk
-  reference_intercept        =  2.00,   # baseline drift
-  reference_slope            =  0.00,   # dependence on baseline_sbp
-  within_sd                  =  5.00    # residual SD
-)
-
-# Mean model: expected change in cholesterol
-cholest_mean <- function(cohort_df, idx, risk_baseline, treat, params = cholest_params) {
-  
-  mu <- params$reference_intercept +
-    params$reference_slope * risk_baseline +
-    treat * (params$treatment_effect_intercept +
-               params$treatment_effect_slope * risk_baseline)
-  mu
-}
-
-# Outcome generator: draws cholesterol change given the mean model
-outcome_cholest <- function(cohort_df, idx, risk_baseline, treat, params = cholest_params) {
-  mu <- cholest_mean(cohort_df, idx, risk_baseline, treat, params = params)
-  stats::rnorm(n = length(idx), mean = mu, sd = params$within_sd)
-}
-
+# Shared definitions from R/scenario_functions.R
+cvd_params
+cvd_prob
+outcome_cvd
 ```
 
-We now simulate how treatment decisions unfold under this continuous outcome setting. The `simulate_design()` function again processes patients in chronological blocks: it calculates risk using `pce_predict()`, applies the adaptive threshold to assign medication, and generates cholesterol outcomes using `outcome_cholest()`. As before, the prediction model is held fixed, so changes in treatment allocation arise solely from threshold adaptation rather than model updating.
+We visualize the mismatch created by applying a 10-year prediction model when outcomes are observed over 54 months. Under the constant-hazard conversion, the 54-month event probability is lower than the corresponding 10-year predicted risk, motivating recalibration.
+
+```{r}
+plot_affine_risk_transform(1, log(cvd_params$follow_up_months / cvd_params$reference_months),
+                           save_path = "figures/panels/case3_risk_transform.rds")
+```
+
+We recalibrated the model by estimating an intercept, a slope for the complementary log-log transformation of original PCE risk, and an assignment coefficient from the accumulated outcomes. Recalibration updates predictions for a new setting while retaining the original predictors [@steyerberg2004validation]. To stabilize early updates, we used a Gaussian penalty centered on an intercept of 0 and slope of 1, which correspond to the original model. Quadratic penalties can stabilize estimation and correspond to Gaussian priors on the penalized coefficients [@cole2014maximum]. We did not penalize the assignment coefficient. We fixed the penalty parameter at $\lambda_{\mathrm{cal}}=4$. Each observed patient contributes to the likelihood, while the penalty is applied once per fit and kept fixed, reducing its relative influence as data accumulate.
+
+```{r}
+model_method_recalibrate[c("type", "recalibration_penalty")]
+```
+
+We now simulate the full adaptive design under this recalibrated model. As in previous scenarios, patients are processed in chronological blocks. The recalibrated model is used to compute risk, and the adaptive threshold is updated to target the 30% assignment rate. Outcomes are then generated using the cardiovascular event mechanism. This setup allows us to examine how model adaptation interacts with threshold adaptation in guiding treatment decisions.
 
 ```{r}
 #--- run the simulation ----
 sim_out <- simulate_design(
   cohort_df              = cohort_df,
   risk_fn                = pce_predict,
-  initial_block_size     = 400,   # warm-up
-  block_size             = 100,   # subsequent blocks
-  n_blocks               = 26,    # total post–warm-up blocks
-  threshold_adapt_method = threshold_method_quantile,
-  model_adapt_method     = model_method_none,
-  outcome_fn             = outcome_cholest
-)
-```
-
-As in the first scenario, the threshold fluctuates early while the system learns but eventually stabilizes, here converging near 18%, marking the risk level at which treatment becomes consistently prioritized.
-
-```{r}
-plot_threshold_trajectory(sim_out, save_path = "figures/case2_threshold_trajectory.rds")
-```
-
-As before, we summarize each block to monitor how the adaptive threshold influences treatment allocation and average cholesterol outcomes over time.
-
-```{r}
-# results tibble per block
-res <- sim_out$results
-
-# quick summaries
-treat_by_block <- res |>
-  dplyr::group_by(block) |>
-  dplyr::summarise(
-    n        = dplyr::n(),
-    treated = round(100 * mean(treat), 1),
-    outcome = round(100 * mean(outcome), 1),
-    threshold = dplyr::first(round(threshold_used*1000)/1000)
-  )
-
-knitr::kable(treat_by_block, caption = "Block-level treatment and outcome rates with threshold used")
-
-```
-
-As before, we estimate the average potential outcomes under each treatment condition across the risk spectrum, using data from the full sample.
-
-```{r}
-# Estimate treatment effect using splines
-fit_out <- estimate_spline(sim_out, family=gaussian())
-
-# Plot
-plot_spline_curves(
-  fit_out, sim_out, pce_predict, cholest_mean, cohort_df,
-  y_lab  = "Mean change in Cholesterol, mg/dL",
-  labels = c("No Medication", "Medication"),
-  save_path = "figures/case2_spline_curves.rds"
-)
-```
-
-We now evaluate the estimated treatment effect at the adaptive threshold. As in earlier scenarios, we use the fitted conditional mean functions to compute the local ATE at the most recent threshold. This allows us to assess whether the treatment effect, which increases with baseline cholesterol, is accurately captured by the adaptive RD estimator.
-
-```{r}
-# -- ATE at last risk threshold
-compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, cholest_mean)
-
-```
-
-### Balancing benefit and burden through number needed to treat
-
-In this third scenario, we again consider the use of a lipid-lowering medication, but the decision threshold now adapts based on a clinically meaningful performance metric: the number needed to treat (NNT). Unlike the prior scenario, where the threshold adapted to maintain a fixed treatment rate, the NNT-based rule seeks to treat patients for whom the expected benefit is large enough to justify the burden of treatment. This setup illustrates how adaptive RD designs can be tailored to reflect not just resource constraints, but benefit–burden trade-offs in clinical decision-making.
-
-NNT provides a clinically intuitive way to interpret treatment benefit by asking how many patients must be treated for one to meaningfully benefit. For binary outcomes, it is the inverse of the risk difference. For continuous outcomes like LDL reduction, we translate the treatment effect into a standardized effect size (Cohen’s *d*) and compute NNT using \[ \text{NNT} = \frac{1}{2\,\Phi(d/\sqrt{2}) - 1}, \] where (\Phi) is the standard normal CDF. Smaller NNT values indicate stronger benefit relative to treatment burden. In this scenario, we target an NNT of 3, meaning that roughly two out of every three treated patients are expected to experience a clinically meaningful reduction in LDL cholesterol.
-
-```{r}
-target_nnt <- 3 # 3 persons
-plot_cohen_d_to_nnt(target_nnt, save_path = "figures/case3_cohen_d_to_nnt.rds")
-```
-
-From the plot, we see that a target NNT of 3 corresponds to a Cohen's $d$ of 0.61. This value defines the effect size we aim to achieve through threshold adaptation.
-
-```{r}
-target_d <- sqrt(2) * qnorm(0.5 * (1 + 1 / target_nnt))
-scales::number(target_d, accuracy = 0.01)
-```
-
-This is considered a medium to large effect size. In our simulation, each one-unit increase in PCE-predicted risk corresponds to an average 10 mg/dL LDL reduction from treatment, with a residual standard deviation of 5 mg/dL. As a result, Cohen’s $d$ increases linearly with risk, starting at 0 for low-risk patients and reaching 2 for those at 100% risk. The figure below plots this relationship and indicates the risk threshold that yields the target NNT.
-
-```{r}
-plot_risk_to_cohen_d(
-  target_d,
-  cholest_params$treatment_effect_slope, 
-  cholest_params$within_sd,
-  save_path = "figures/case3_risk_to_cohen_d.rds"
-  )
-```
-
-The solid line shows how Cohen’s $d$ increases linearly with risk, reflecting that treatment benefit scales with risk.
-
-We define the adaptive threshold rule to search for the risk level where the estimated treatment effect achieves the target NNT.
-
-```{r}
-# NNT adaptation: set threshold so that we target a specific NNT
-threshold_method_nnt <- list(
-     type               = "nnt",
-     initial_threshold  = 0.10,       # initial_threshold,
-     desired_nnt        = target_nnt   # Target NNT
-  ) 
-
-```
-
-Like before, we begin with an initial threshold of 10%, then update it after each patient block to target an NNT of 3. We estimate the treatment effect across risk values using past data, standardize it via the pooled standard deviation, and search for the risk level yielding a Cohen’s $d$ near 0.61 (corresponding to NNT = 3). Let this estimate after block $b$ be $r_{*,b}$. To reduce noise, we smooth updates by averaging the new and previous thresholds: $$
-r_{b+1} = \tfrac{1}{2} r_{*,b} + \tfrac{1}{2} r_b,
-$$ where $r_b$ is the risk used in block $b$. This procedure assumes the treatment effect increases with risk—a strong assumption, but one that holds in our setup, since higher-risk patients are expected to see larger LDL reductions.
-
-We now rerun the simulation, this time using the NNT-based rule to adapt the threshold based on estimated treatment benefit.
-
-```{r}
-#--- run the simulation ----
-sim_out <- simulate_design(
-  cohort_df              = cohort_df,
-  risk_fn                = pce_predict,
-  initial_block_size     = 400,   # warm-up
-  block_size             = 100,   # subsequent blocks
-  n_blocks               = 26,    # total post–warm-up blocks
-  threshold_adapt_method = threshold_method_nnt,
-  model_adapt_method     = model_method_none,
-  outcome_fn             = outcome_cholest
-)
-```
-
-We plot how the threshold evolves under the NNT-based rule. After early fluctuations, it settles near 30%, indicating that patients above this risk level are consistently prioritized for treatment based on the target NNT.
-
-```{r}
-plot_threshold_trajectory(sim_out, save_path = "figures/case3_threshold_trajectory.rds")
-```
-
-We also report the proportion of patients treated (i.e., prescribed the medication) and the average change in LDL cholesterol (i.e., the outcome) in each block.
-
-```{r}
-# results tibble per block
-res <- sim_out$results
-
-# quick summaries
-treat_by_block <- res |>
-  dplyr::group_by(block) |>
-  dplyr::summarise(
-    n        = dplyr::n(),
-    treated = round(100 * mean(treat), 1),
-    outcome = round(100 * mean(outcome), 1),
-    threshold = dplyr::first(round(threshold_used*1000)/1000)
-  )
-
-knitr::kable(treat_by_block, caption = "Block-level treatment and outcome rates with threshold used")
-
-```
-
-As before, we estimate the average potential outcomes under each treatment condition across the risk spectrum, using data from the full sample. This step reveals how treatment benefit varies with predicted risk and allows us to evaluate whether the adaptive RD estimator recovers the expected heterogeneity.
-
-```{r}
-# Estimate treatment effect using splines
-fit_out <- estimate_spline(sim_out, family=gaussian())
-
-# Plot
-plot_spline_curves(
-  fit_out, sim_out, pce_predict, cholest_mean, cohort_df,
-  y_lab  = "Mean change in Cholesterol, mg/dL",
-  labels = c("No Medication", "Medication"),
-  save_path = "figures/case3_spline_curves.rds"
-)
-```
-
-We now evaluate the estimated treatment effect at the adaptive threshold. As in earlier scenarios, we extract the local ATE using the fitted conditional means. This allows us to assess whether the adaptive RD estimator accurately recovers the effect size that guided the NNT-based threshold adaptation.
-
-```{r}
-# -- ATE at last risk threshold
-compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, cholest_mean)
-
-```
-
-### Recalibrating the risk model
-
-In the fourth scenario, we shift focus from adapting the treatment threshold to updating the prediction model itself. The outcome is a cardiovascular event, simulated as a binary variable indicating whether the patient experiences an ASCVD event during follow-up. Specifically, we consider a setting where the original risk model is miscalibrated—underestimating cardiovascular event risk for high-risk patients and overestimating it for low-risk ones. To address this mismatch, we implement a recalibration strategy that applies an affine transformation to the model’s linear predictor, allowing it to better align predicted and actual risks over time.
-
-The simulated outcome is the occurrence of an ASCVD event, generated using a miscalibrated version of the pooled cohort equations. Specifically, for each patient, we recompute baseline risk and apply an affine transformation to the linear predictor to introduce systematic calibration error. Let ( \bar{R}\_{i,1} ) be the original predicted risk, transformed to the log–log scale as ( \eta*i =\* \log(-\log(1 - \bar{R}{i,1})) ). The true event probability is then given by \[ p_i = 1 - \exp\left{ -\exp\left( \alpha\_0 + \alpha\_1 \eta\_i + \tau A_i \right) \right}, \] where ( A_i ) indicates treatment, ( \alpha\_0 ) and ( \alpha\_1 ) control baseline drift and slope, and ( \tau ) represents the treatment effect. Events are drawn as Bernoulli(( p_i )), creating a nonlinear relationship between risk and outcome that challenges the adaptive estimator.
-
-```{r}
-# --- Outcome: Cardiovascular event -----
-
-# Parameters
-cvd_params <- list(
-  treatment_effect_intercept =  0.4,    # shift for treated
-  baseline_intercept         =  0.1,    # baseline drift
-  baseline_slope             =  0.9     # dependence on baseline_sbp
-)
-
-# ---- Simulated probability (pce model is inaccurate) ----
-cvd_prob <- function(cohort_df, idx, risk_baseline, treat, params = cvd_params) {
-  
-  # Copy df for local edits
-  df <- cohort_df[idx, ]
-  
-  # Recompute baseline risk with updated labels
-  risk_new <- pce_predict(df, coefs = pce_coefs, coef_adjust = NULL)
-  
-  # Get on linear predictor scale
-  lp_new <- log(-log(1-risk_new))
-  
-  # Apply affine transformation
-  lp_new <- params$baseline_intercept + 
-    params$baseline_slope * lp_new + 
-    params$treatment_effect_intercept * treat
-  
-  # Transform back to response scale
-  p <- 1 - exp(-exp(lp_new))
-  
-  # Return probability
-  return(p)
-}
-
-outcome_cvd <- function(cohort_df, idx, risk_baseline, treat, params = cvd_params) {
-  p <- cvd_prob(cohort_df, idx, risk_baseline, treat, params)
-  stats::rbinom(n = length(idx), size = 1, prob = p)
-}
-
-```
-
-We visualize the mismatch between predicted and true risk by plotting how the affine transformation alters the original predictions. The model tends to underestimate risk for higher-risk patients and overestimate it for lower-risk ones, motivating the need for recalibration.
-
-```{r}
-plot_affine_risk_transform(cvd_params$baseline_slope, cvd_params$baseline_intercept,
-                           save_path = "figures/case4_risk_transform.rds")  
-```
-
-We now define the model adaptation strategy using recalibration, as shown in the next block. Recalibration modifies the model’s linear predictor through an affine transformation to better align predictions with observed outcomes. It begins from the original PCE coefficients and updates them gradually. The `shrinkage_factor` controls how strongly new estimates are pulled toward the original values, using a weight of (1 / (1 + n / \text{shrinkage\_factor})), where (n) is the number of patients contributing to the update. This ensures the model adapts slowly rather than overreacting to recent data.
-
-```{r}
-
-# Recalibrate model
-model_method_recalibrate <- list(
-  type        = "recalibrate",
-  coef_original  = pce_coefs,
-  coef_adjusted  = NULL,
-  shrinkage_factor   = 3000
-)
-
-```
-
-We now simulate the full adaptive design under this recalibrated model. As in previous scenarios, patients are processed in chronological blocks. The recalibrated model is used to compute risk, and the adaptive threshold is updated to maintain the desired referral rate. Outcomes are then generated using the cardiovascular event mechanism. This setup allows us to examine how model adaptation interacts with threshold adaptation in guiding treatment decisions.
-
-```{r}
-#--- run the simulation ----
-sim_out <- simulate_design(
-  cohort_df              = cohort_df,
-  risk_fn                = pce_predict,
-  initial_block_size     = 400,   # warm-up
-  block_size             = 100,   # subsequent blocks
-  n_blocks               = 26,    # total post–warm-up blocks
+  block_size             = 100,
+  n_blocks               = 30,
   threshold_adapt_method = threshold_method_quantile,
   model_adapt_method     = model_method_recalibrate,
   outcome_fn             = outcome_cvd
 )
 ```
 
-To assess how recalibration alters individual risk estimates over time, we track how predicted risk evolves for the first 100 patients in the cohort. As the model updates, these patients’ risk scores are re-evaluated at each block, illustrating how gradual calibration shifts can change clinical prioritization.
+To assess how recalibration alters individual risk estimates over time, we track how predicted risk evolves for the first 100 simulated patients. As the model updates, these patients’ risk scores are re-evaluated at each block, illustrating how recalibration changes the scale of predicted risk.
 
 ```{r}
-plot_risk_trajectory(sim_out, save_path = "figures/case4_risk_trajectory.rds")
+plot_risk_trajectory(sim_out, save_path = "figures/panels/case3_risk_trajectory.rds")
 ```
 
-We report block-level referral rates and ASCVD event rates (treated = referral; outcome = ASCVD event) to monitor how model and threshold updates affect allocation and observed incidence.
 
-```{r}
-# results tibble per block
-res <- sim_out$results
-
-# quick summaries
-treat_by_block <- res |>
-  dplyr::group_by(block) |>
-  dplyr::summarise(
-    n        = dplyr::n(),
-    treated = round(100 * mean(treat), 1),
-    outcome = round(100 * mean(outcome), 1),
-    threshold = dplyr::first(round(threshold_used*1000)/1000)
-  )
-
-knitr::kable(treat_by_block, caption = "Block-level treatment and outcome rates with threshold used")
-
-```
-
-We now estimate the conditional mean outcome curves under each treatment arm across the risk spectrum. This step visualizes how predicted risk relates to event probability for treated and untreated patients.
+We now estimate the conditional mean outcome curves under each assignment across the risk spectrum. This shows how final predicted risk relates to event probability under assignment to medication or no medication.
 
 ```{r}
 # Estimate treatment effect using splines
@@ -551,9 +271,10 @@ fit_out <- estimate_spline(sim_out, family=binomial())
 
 # Plot
 plot_spline_curves(fit_out, sim_out, pce_predict, cvd_prob, cohort_df,
-  y_lab  = "Probability of cardiovascular event",
+  y_lab  = "Probability of\ncardiovascular event",
   labels = c("No Medication", "Medication"),
-  save_path = "figures/case4_spline_curves.rds")
+  x_limits = c(0, 0.25),
+  save_path = "figures/panels/case3_spline_curves.rds")
 
 ```
 
@@ -565,34 +286,36 @@ compare_ate_at_threshold(fit_out, sim_out, cohort_df, pce_predict, cvd_prob)
 
 ```
 
-### Revising model to remove race and gender
+### Revising the model to remove race
 
-In the final scenario, we simulate a model revision that removes race and gender from the risk prediction model. This reflects recent efforts to eliminate demographic variables from clinical algorithms. We evaluate how such changes affect predicted risk, treatment allocation, and estimation of treatment effects.
+In the final scenario, we revise the prediction model to remove race while retaining separate equations for women and men. At the start of the scenario, the original White PCE equation is used for everyone of the same sex. As cardiovascular events accumulate, the remaining coefficients are re-estimated without using race.
 
-The code block below specifies the model revision strategy. Starting from the original PCE coefficients, we remove the terms for race and gender and use the revised model to compute updated risk scores. The shrinkage factor is again applied to gradually blend the revised coefficients with the original ones as more data accumulate, providing a smoothed transition away from demographic-based predictions.
+We stabilize these updates with a Gaussian penalty centered on the corresponding White PCE coefficients, drawing on penalized approaches to model updating [@vanwieringen2022sequential; @vancalster2017validation]. We set $\lambda_{\mathrm{rev}}=3{,}000$ and keep the penalty fixed, so its influence relative to the likelihood decreases as more patients are observed. The assignment coefficient is estimated without a penalty.
 
 ```{r}
-
-# Revise model
-model_method_revise <- list(
-  type           = "revise",
-  coef_original  = pce_coefs,
-  coef_adjusted  = NULL,
-  shrinkage_factor   = 3000
-)
-
+model_method_revise[c("type", "revision_penalty")]
 ```
 
-Below, we simulate the full adaptive design using the revised model without race and gender. Risk is recalculated using the updated coefficients, and both the threshold and model continue to adapt over time.
+For Black participants in the NHANES source cohort, we compare predictions from the original Black PCE equation with those from the White PCE equation for the same sex. The dashed diagonal marks no change in predicted risk; White and Other participants are omitted because their predictions are unchanged.
+
+```{r}
+plot_initial_revision_shift(
+  cohort_df,
+  coef_original = pce_coefs,
+  coef_initial = model_method_revise$coef_initial,
+  save_path = "figures/panels/case4_initial_revision.rds"
+)
+```
+
+Below, we simulate the full adaptive design using the revised model without race. Risk is recalculated using the updated coefficients, and both the threshold and model continue to adapt over time.
 
 ```{r}
 #--- run the simulation ----
 sim_out <- simulate_design(
   cohort_df              = cohort_df,
   risk_fn                = pce_predict,
-  initial_block_size     = 400,   # warm-up
-  block_size             = 100,   # subsequent blocks
-  n_blocks               = 26,    # total post–warm-up blocks
+  block_size             = 100,
+  n_blocks               = 30,
   threshold_adapt_method = threshold_method_quantile,
   model_adapt_method     = model_method_revise,
   outcome_fn             = outcome_cvd
@@ -602,10 +325,10 @@ sim_out <- simulate_design(
 We plot how predicted risks evolve for the first 100 patients under the revised model to illustrate how risk estimates change over time.
 
 ```{r}
-plot_risk_trajectory(sim_out, save_path = "figures/case5_risk_trajectory.rds")
+plot_risk_trajectory(sim_out, save_path = "figures/panels/case4_risk_trajectory.rds")
 ```
 
-We now estimate the conditional mean outcome curves under each treatment arm using the revised model without race and gender. This shows how treatment effects vary with risk when demographic predictors are excluded.
+We now estimate the conditional mean outcome curves under each assignment using the revised model without race.
 
 ```{r}
 # Estimate treatment effect using splines
@@ -613,13 +336,14 @@ fit_out <- estimate_spline(sim_out, family=binomial())
 
 # Plot
 plot_spline_curves(fit_out, sim_out, pce_predict, cvd_prob, cohort_df,
-  y_lab  = "Probability of cardiovascular event",
+  y_lab  = "Probability of\ncardiovascular event",
   labels = c("No Medication", "Medication"),
-  save_path = "figures/case5_spline_curves.rds")
+  x_limits = c(0, 0.25),
+  save_path = "figures/panels/case4_spline_curves.rds")
 
 ```
 
-Lastly, we compute the local ATE at the updated threshold to assess how removing race and gender affects the estimated treatment effect.
+Lastly, we compute the local ATE at the updated threshold.
 
 ```{r}
 # -- ATE at last risk threshold
@@ -634,43 +358,145 @@ We combine individual scenario figures into multi-panel layouts to create concis
 ```{r}
 
 # Figure for threshold adaptation
-fig_files <- matrix(c(
-  "figures/case1_threshold_trajectory.rds",  # upper left
-  "figures/case3_cohen_d_to_nnt.rds",        # lower left
-  "figures/case1_spline_curves.rds",         # upper middle
-  "figures/case3_risk_to_cohen_d.rds",       # lower middle
-  "figures/case2_spline_curves.rds",         # upper right
-  "figures/case3_spline_curves.rds"          # lower right
-), nrow = 2, byrow = FALSE)  # <-- KEY CHANGE
+fig_files <- c(
+  "figures/panels/case1_threshold_trajectory.rds",
+  "figures/panels/case1_spline_curves.rds",
+  "figures/panels/case2_ldl_reduction_by_risk.rds",
+  "figures/panels/case2_threshold_trajectory.rds",
+  "figures/panels/case2_spline_curves.rds"
+)
 
-
-# Build and save the panel as EPS
-save_panel_from_rds(fig_files, filename = "figures/fig_threshold_adaptation.pdf", width = 16, height = 10)
-
-# Figure for model adaptation
-fig_files <- matrix(c(
-  "figures/case4_risk_transform.rds",  # row 1
-  "figures/case4_risk_trajectory.rds",  # row 2
-  "figures/case4_spline_curves.rds",   # row 3
-  "figures/case5_spline_curves.rds"  # row 4
-), nrow = 4, byrow = FALSE)  # <-- KEY CHANGE
-
-# Build and save the panel as EPS
-save_panel_from_rds(fig_files, filename = "figures/fig_model_adaptation.pdf", width = 9, height = 18)
-
-# Figure for model adaptation (now 2-by-2)
-fig_files <- matrix(c(
-  "figures/case4_risk_transform.rds",   # upper left
-  "figures/case4_risk_trajectory.rds",  # upper right
-  "figures/case4_spline_curves.rds",    # lower left
-  "figures/case5_spline_curves.rds"     # lower right
-), nrow = 2, byrow = TRUE)  # <-- KEY CHANGE: 2 rows, fill by row
-
-# Build and save the panel as PDF
+# Three narrower panels above two wider outcome-curve panels; tags follow discussion order
 save_panel_from_rds(
   fig_files,
-  filename = "figures/fig_model_adaptation_2by2.pdf",
-  width = 16,  # adjust width and height for square aspect
-  height = 10
+  filename = "figures/fig_threshold_adaptation.pdf",
+  width = 16,
+  height = 9,
+  rows = list(c(1, 3, 4), c(2, 5))
+)
+
+# Paper figure: recalibration setup and risk trajectories above outcome curves.
+fig_files <- c(
+  "figures/panels/case3_risk_transform.rds",
+  "figures/panels/case3_risk_trajectory.rds",
+  "figures/panels/case3_spline_curves.rds",
+  "figures/panels/case4_spline_curves.rds"
+)
+
+save_panel_from_rds(
+  fig_files,
+  filename = "figures/fig_model_adaptation.pdf",
+  width = 12,
+  height = 9,
+  design = "AB\nCD"
 )
 ```
+
+## Adaptation
+
+Scenario 1 compares a fixed threshold with 3- and 6-block ramps. The fixed
+threshold is the 70th percentile of the original cohort's PCE risks. The adaptive settings ramp
+to a 30% assignment target and remain there. Scenario 4 varies the revision penalty over 1,000, 3,000, and 10,000.
+
+Run `source("run_adaptation.R")` from the project root to generate these simulations
+and the figure. Completed settings are reused, so only missing settings run.
+Seeds are matched across settings within each replication. Rendering
+this document reads the saved results.
+
+```{r}
+#| label: adaptation-paper-figure
+knitr::include_graphics("figures/fig_adaptation.png")
+```
+
+Panels A–C show the mean threshold, observed assignment proportions within
+risk bins, and estimation errors for Scenario 1. Assignment proportions are
+centered on each replication's final threshold using the saved risk-bin means;
+lines show means across replications.
+The dashed line in Panel B marks zero, the final threshold after centering.
+For the adaptive settings, the first block assigns nobody and has an infinite
+threshold, omitted from
+Panel A. Panel D shows mean absolute risk change from the deployed starting
+model, evaluated on the same original cohort at each update and averaged
+across replications. Changes are in percentage points. Panel E shows mean
+cumulative variance explained by PCs 1–5 of the centered, unscaled history residuals.
+Risks are first transformed to the complementary log-log scale, and historical
+values are residualized on the final value before PCA. Panel F shows estimation errors for Scenario 4.
+Each point in an error panel
+is one replication.
+
+### Numerical results
+
+These summaries use the saved replications. Bias and RMSE are in percentage points; MSE is in squared percentage points. Coverage is the percentage of 95% confidence intervals containing the true effect.
+
+```{r}
+# Summarize estimation performance for each adaptation setting.
+adaptation_results <- readRDS("results/adaptation_paper/adaptation_results.rds")
+adaptation_summary <- adaptation_results$performance |>
+  dplyr::group_by(scenario, setting) |>
+  dplyr::summarise(
+    Replications = dplyr::n(),
+    Bias = 100 * mean(error),
+    MSE = 100^2 * mean(squared_error),
+    RMSE = sqrt(MSE),
+    `Coverage (%)` = 100 * mean(covered),
+    .groups = "drop"
+  )
+knitr::kable(adaptation_summary, digits = c(0, 0, 0, 2, 2, 2, 1),
+             caption = "Estimation performance under threshold and model adaptation.")
+```
+
+```{r}
+# Report the cumulative variance percentages shown in panel E.
+pca_summary <- adaptation_results$pca |>
+  dplyr::filter(scenario == "S4") |>
+  dplyr::mutate(Penalty = as.integer(sub("revision_penalty_", "", setting))) |>
+  dplyr::group_by(Penalty, component) |>
+  dplyr::summarise(
+    `Mean cumulative variance (%)` = 100 * mean(cumulative_variance),
+    .groups = "drop"
+  )
+knitr::kable(pca_summary, digits = c(0, 0, 1),
+             col.names = c("Revision penalty", "Number of PCs", "Mean cumulative variance (%)"),
+             caption = "Cumulative variance explained by residual risk PCs in Scenario 4.")
+```
+
+## Estimator comparison
+
+The estimator comparison uses 2,000 replications in each of the four scenarios. Run `source("run_comparison.R")` separately from this document. The saved results are kept in `results/comparison/comparison_results.rds`; rendering reads the completed figure and does not launch Monte Carlo simulations.
+
+```{r}
+knitr::include_graphics("figures/fig_comparison.pdf")
+```
+
+### Numerical results
+
+Bias and RMSE use the units shown below; MSE uses squared units. Coverage is reported only for our estimator, whose confidence intervals were saved in these runs.
+
+```{r}
+# Summarize all six estimators from the completed comparison runs.
+comparison_summary <- readRDS("results/comparison/comparison_results.rds") |>
+  dplyr::mutate(
+    method = factor(method,
+      levels = c("spline", "naive", "outreg", "outreg_separate", "ipw", "aipw"),
+      labels = c("Adaptive RD", "Naive", "Outcome regression (pooled)",
+                 "Outcome regression (separate arms)", "IPW", "AIPW")),
+    Units = dplyr::if_else(scenario == "S2", "mg/dL", "pp"),
+    error = (est - truth) * dplyr::if_else(scenario == "S2", 1, 100)
+  ) |>
+  dplyr::group_by(scenario, method, Units) |>
+  dplyr::summarise(
+    Replications = dplyr::n(),
+    Bias = mean(error),
+    MSE = mean(error^2),
+    RMSE = sqrt(MSE),
+    `Coverage (%)` = 100 * mean(ci_lo <= truth & truth <= ci_hi),
+    .groups = "drop"
+  )
+knitr::kable(comparison_summary, digits = c(0, 0, 0, 0, 2, 2, 2, 1),
+             caption = "Estimator comparison, including coverage of the adaptive RD intervals.")
+```
+
+## References
+
+::: {#refs}
+:::
